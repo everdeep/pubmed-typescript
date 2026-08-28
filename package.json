@@ -1,0 +1,56 @@
+{
+  "name": "@everdeep/pubmed",
+  "version": "0.1.0",
+  "description": "Safe, typed TypeScript client for the NCBI PubMed E-utilities API",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "prepack": "npm run build",
+    "test": "vitest run",
+    "test:live": "vitest run test/live.integration.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "fast-xml-parser": "^5.10.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
+  },
+  "keywords": [
+    "pubmed",
+    "research",
+    "papers",
+    "api",
+    "typescript"
+  ],
+  "license": "MIT"
+}

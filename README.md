@@ -1,0 +1,167 @@
+# @everdeep/pubmed
+
+A strict TypeScript client for PubMed search and record retrieval through the NCBI E-utilities API. It supports Node.js 18+, ESM and CommonJS.
+
+## Install
+
+```bash
+npm install @everdeep/pubmed
+```
+
+## Configure
+
+NCBI asks API clients to identify themselves. `email` and `tool` are therefore required explicitly:
+
+```ts
+import { PubMedClient } from "@everdeep/pubmed";
+
+const client = new PubMedClient({
+  email: "research@example.org",
+  tool: "literature-review-service",
+  apiKey: "optional-ncbi-api-key",
+});
+```
+
+The package does **not** read environment variables. It always uses the fixed NCBI endpoint at `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/`; there is no custom base URL or generic E-utilities request method. A Fetch-compatible implementation can be passed as `fetch` for testing.
+
+## Retrieve records
+
+```ts
+const record = await client.get("38601234"); // PubMedRecord | null
+
+const batch = await client.getMany(["38601234", "38300001", "38601234"]);
+console.log(batch.records);       // follows caller order and retains duplicates
+console.log(batch.missingPmids);  // missing IDs in caller order
+console.log(batch.warnings);
+```
+
+PMIDs must be non-zero numeric strings. `getMany()` deduplicates network retrieval, uses batches of at most 200 IDs, and reconstructs caller order. Cancellation rejects the whole operation with `AbortedError`; it never returns a normal-looking partial result.
+
+## Search
+
+Native PubMed query syntax and sort values are passed to ESearch:
+
+```ts
+const first = await client.search({
+  query: "CRISPR[Title] AND 2024[Date - Publication]",
+  pageSize: 50,
+  sort: "relevance",
+});
+
+if (first.nextCursor) {
+  const second = await client.search({ cursor: first.nextCursor });
+}
+```
+
+Cursors are opaque, versioned, contain no client credentials, and use NCBI search history. They are temporary and can produce `CursorExpiredError`. Malformed cursors produce `CursorInvalidError`.
+
+For progressive consumption, use `searchAll()`. `maxResults` is required so a caller must make the retrieval bound explicit:
+
+```ts
+for await (const batch of client.searchAll({
+  query: "single cell[Title/Abstract]",
+  maxResults: 1_000,
+  pageSize: 100,
+  includeLinkOuts: true,
+})) {
+  for (const record of batch.records) {
+    console.log(record.pmid, record.title);
+  }
+}
+```
+
+PubMed ranking is retained. PubMed history retrieval has an approximately 10,000-record window. The client raises `SearchLimitError` instead of silently truncating an exhaustive request beyond that window. Automatic date partitioning is intentionally not part of v1.
+
+## Records
+
+`PubMedRecord` is a readonly discriminated union:
+
+- `kind: "article"` — `PubmedArticle`
+- `kind: "book"` — `PubmedBookArticle`
+- `kind: "unknown"` — a forward-compatible direct record type, retained with a warning
+
+Records are plain JSON-safe values. They expose ordered identifiers and `pmid`, `doi`, and `pmcid` conveniences; safe plain-text titles; structured abstracts and authors; affiliations and author identifiers; journal/book citation fields; partial calendar dates (never JavaScript `Date`); history; publication types; keywords; MeSH headings; and languages.
+
+```ts
+if (record?.kind === "article") {
+  console.log(record.journal?.title);
+  console.log(record.dates.electronic?.year);
+}
+```
+
+Every record includes `rawXml`, which is the exact direct-child XML fragment received from PubMed, without serialization or normalization. `source` retains parsed source data for fields not represented in the normalized surface.
+
+## Links and LinkOut
+
+Canonical HTTPS links for PubMed, DOI, and PMC are generated from source identifiers. Per-call LinkOut enrichment is opt-in:
+
+```ts
+const record = await client.get("38601234", { includeLinkOuts: true });
+```
+
+LinkOut URLs are returned with provider/provenance metadata. The client never dereferences them and discards schemes other than HTTP and HTTPS.
+
+## Caching
+
+No persistent or memory cache is enabled implicitly. Supply an async adapter, or opt into the bounded helper:
+
+```ts
+import { MemoryCache, PubMedClient } from "@everdeep/pubmed";
+
+const cache = new MemoryCache({
+  maxEntries: 500,
+  maxBytes: 25 * 1024 * 1024,
+  ttlMs: 5 * 60_000,
+});
+const client = new PubMedClient({ email, tool, cache });
+```
+
+Only successful response bodies are cached. `MemoryCache` defaults to 500 entries and 25 MiB; its byte limit counts the UTF-8 bytes of both keys and values, and entries larger than the limit are skipped. Cache and in-flight coalescing keys are hashed and credential-free. Equivalent in-flight requests are always coalesced; canceling one subscriber does not cancel another subscriber.
+
+## Rate and transport policy
+
+Conservative defaults:
+
+| Setting | Default |
+| --- | ---: |
+| Search page size | 20 |
+| Maximum search/fetch batch | 200 |
+| Response body cap | 25 MiB |
+| Limiter queue | 1,000 |
+| Timeout per attempt | 30 seconds |
+| Attempts, including the first | 4 |
+
+A process-shared FIFO limiter stays below NCBI ceilings: approximately 2.8 requests/second without a key and 9 requests/second with a key (below NCBI's 3/10 limits). These rate ceilings cannot be raised. `RateLimitCoordinator` can add distributed coordination and receives only a non-reversible credential fingerprint, never the API key. HTTP 429 `Retry-After` pauses the shared and distributed bucket. Server-directed cooldowns are conservatively capped at five minutes; larger values publish that bounded cooldown and stop automatic retry rather than scheduling an excessive timer.
+
+The client retries network failures, timeouts, HTTP 408, 429, and 5xx responses with exponential full jitter. Other 4xx responses and XML/JSON parse failures are not retried. Long requests automatically use POST. Response bodies are capped while streaming.
+
+There is no default logging. An optional `onEvent` callback receives sanitized request/retry/queue/cooldown/parse events. Callback exceptions are ignored. Events and typed errors do not include API keys, email addresses, queries, request bodies, or raw responses.
+
+## Errors
+
+All library failures extend `PubMedError` and have stable `code` and `retryable` properties. Exported subclasses include:
+
+- `ValidationError`
+- `HttpError` and `RateLimitError`
+- `TimeoutError` and `NetworkError`
+- `ResponseTooLargeError` and `QueueFullError`
+- `ParseError` and `InvalidResponseError`
+- `CursorExpiredError` and `CursorInvalidError`
+- `AbortedError`
+- `SearchLimitError`
+
+Missing PMIDs are data (`null` or `missingPmids`), not exceptions.
+
+## Development
+
+```bash
+npm test
+npm run typecheck
+npm run build
+```
+
+All normal tests mock Fetch and perform no live requests. To run the opt-in integration test, provide an identity explicitly:
+
+```bash
+PUBMED_LIVE=1 PUBMED_EMAIL=research@example.org npm run test:live
+```

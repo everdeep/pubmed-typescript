@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE PubmedArticleSet PUBLIC "-//NLM//DTD PubMedArticle, 1st January 2024//EN" "https://dtd.nlm.nih.gov/ncbi/pubmed/out/pubmed_240101.dtd">
+<PubmedArticleSet>
+<!-- framing comment with > -->
+<PubmedArticle data-note="quoted > value">
+  <MedlineCitation Status="MEDLINE">
+    <PMID Version="1">123</PMID>
+    <DateCompleted><Year>2024</Year><Month>01</Month><Day>02</Day></DateCompleted>
+    <DateRevised><Year>2024</Year><Month>02</Month></DateRevised>
+    <Article PubModel="Print-Electronic">
+      <Journal>
+        <ISSN IssnType="Electronic">1234-5678</ISSN>
+        <JournalIssue><Volume>10</Volume><Issue>2</Issue><PubDate><Year>2024</Year><Season>Spring</Season></PubDate></JournalIssue>
+        <Title>Journal of Tests</Title><ISOAbbreviation>J Test</ISOAbbreviation>
+      </Journal>
+      <!-- <ArticleTitle>Wrong commented title</ArticleTitle> -->
+      <ArticleTitle>A safe <i>mixed</i> title &amp; result</ArticleTitle>
+      <Pagination><MedlinePgn>1-9</MedlinePgn></Pagination>
+      <Abstract><AbstractText Label="BACKGROUND" NlmCategory="BACKGROUND"><![CDATA[Why > what.]]></AbstractText><AbstractText Label="RESULTS">It worked.</AbstractText></Abstract>
+      <AuthorList>
+        <Author ValidYN="Y"><LastName>Doe</LastName><ForeName>Jane</ForeName><Initials>J</Initials><Identifier Source="ORCID">0000-0001-2345-6789</Identifier><AffiliationInfo><Affiliation>Test University</Affiliation><Identifier Source="GRID">grid.1</Identifier></AffiliationInfo></Author>
+        <Author><CollectiveName>Study Group</CollectiveName></Author>
+      </AuthorList>
+      <Language>eng</Language>
+      <PublicationTypeList><PublicationType UI="D016428">Journal Article</PublicationType></PublicationTypeList>
+      <ArticleDate DateType="Electronic"><Year>2023</Year><Month>12</Month><Day>30</Day></ArticleDate>
+    </Article>
+    <KeywordList Owner="NLM"><Keyword MajorTopicYN="Y">Testing</Keyword><Keyword>XML</Keyword></KeywordList>
+    <MeshHeadingList><MeshHeading><DescriptorName UI="D000001" MajorTopicYN="Y">Tests</DescriptorName><QualifierName UI="Q1" MajorTopicYN="N">methods</QualifierName></MeshHeading></MeshHeadingList>
+  </MedlineCitation>
+  <PubmedData>
+    <History><PubMedPubDate PubStatus="received"><Year>2023</Year><Month>10</Month><Day>1</Day></PubMedPubDate></History>
+    <ArticleIdList><ArticleId IdType="pubmed">123</ArticleId><ArticleId IdType="doi">10.1000/test</ArticleId><ArticleId IdType="pmc">PMC123</ArticleId></ArticleIdList>
+  </PubmedData>
+</PubmedArticle>
+<PubmedBookArticle>
+  <BookDocument>
+    <PMID>456</PMID><ArticleTitle>Book chapter</ArticleTitle>
+    <AuthorList><Author><LastName>Smith</LastName><ForeName>Alex</ForeName></Author></AuthorList>
+    <Language>eng</Language><PublicationTypeList><PublicationType>Book Chapter</PublicationType></PublicationTypeList>
+    <Book><BookTitle>Handbook</BookTitle><CollectionTitle>Series</CollectionTitle><Publisher><PublisherName>Publisher</PublisherName><PublisherLocation>London</PublisherLocation></Publisher><Edition>2</Edition><Isbn>978-1</Isbn></Book>
+  </BookDocument>
+  <PubmedBookData><ArticleIdList><ArticleId IdType="pubmed">456</ArticleId><ArticleId IdType="doi">10.1000/book</ArticleId></ArticleIdList></PubmedBookData>
+</PubmedBookArticle>
+<FuturePubmedRecord><PMID>789</PMID><Payload><![CDATA[future > data]]></Payload></FuturePubmedRecord>
+<AnotherFuture />
+</PubmedArticleSet>
