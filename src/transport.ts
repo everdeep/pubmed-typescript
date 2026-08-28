@@ -13,7 +13,16 @@ import { RequestRateLimiter, safeEvent } from "./rate-limiter.js";
 import type { CacheAdapter, PubMedClientOptions, PubMedEvent } from "./types.js";
 
 export type Endpoint = "esearch" | "efetch" | "elink";
-export type ResponseValidator = (body: string) => void;
+export interface ResponseDecoder<TValue> {
+  /** Stable identity for the decoded value type and validation context. */
+  readonly key: string;
+  readonly decode: (body: string) => TValue;
+}
+
+export interface TransportRequestOptions {
+  readonly signal?: AbortSignal;
+  readonly cache?: boolean;
+}
 
 interface TransportOptions {
   readonly email: string;
@@ -29,9 +38,9 @@ interface TransportOptions {
   readonly rateLimitCoordinator?: PubMedClientOptions["rateLimitCoordinator"];
 }
 
-interface InflightRequest {
+interface InflightRequest<TValue> {
   readonly controller: AbortController;
-  promise: Promise<string>;
+  promise: Promise<TValue>;
   subscribers: number;
   settled: boolean;
 }
@@ -40,6 +49,8 @@ const ORIGIN = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/";
 const encoder = new TextEncoder();
 const INVALID_CACHE_KEY_LIMIT = 1_000;
 const INVALID_CACHE_KEY_TTL_MS = 5 * 60_000;
+const PENDING_CACHE_WRITE_LIMIT = 100;
+const CACHE_MUTATION_TOKEN_LIMIT = INVALID_CACHE_KEY_LIMIT + PENDING_CACHE_WRITE_LIMIT;
 /** Maximum server-directed cooldown accepted before automatic retries stop. */
 const MAX_RETRY_AFTER_MS = 5 * 60_000;
 const HTTP_DATE_PATTERN = /^(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT|(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), \d{2}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{2} \d{2}:\d{2}:\d{2} GMT|(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (?: \d|\d{2}) \d{2}:\d{2}:\d{2} \d{4})$/;
@@ -205,9 +216,12 @@ export class Transport {
   readonly #maxAttempts: number;
   readonly #maxResponseBytes: number;
   readonly #limiter: RequestRateLimiter;
-  readonly #inflight = new Map<string, InflightRequest>();
+  readonly #inflight = new Map<string, InflightRequest<unknown>>();
   readonly #invalidCacheKeys = new InvalidCacheTracker();
   readonly #pendingCacheDeletes = new Map<string, Promise<void>>();
+  readonly #pendingCacheWrites = new Set<Promise<void>>();
+  readonly #pendingCacheMutationsByKey = new Map<string, Promise<void>>();
+  readonly #latestCacheMutation = new Map<string, object>();
 
   public constructor(options: TransportOptions) {
     this.#email = options.email;
@@ -223,46 +237,54 @@ export class Transport {
     this.#limiter = new RequestRateLimiter(fingerprint, options.apiKey !== undefined, options.maxQueuedRequests, options.rateLimitCoordinator, options.onEvent);
   }
 
-  public async request(
+  public async request<TValue>(
     endpoint: Endpoint,
     parameters: Readonly<Record<string, string>>,
-    signal?: AbortSignal,
-    validate?: ResponseValidator,
-  ): Promise<string> {
+    decode: ResponseDecoder<TValue>,
+    options: TransportRequestOptions = {},
+  ): Promise<TValue> {
+    const { signal } = options;
+    const useCache = options.cache ?? true;
     if (signal?.aborted === true) throw new AbortedError();
     const semantic = new URLSearchParams(parameters);
     semantic.sort();
     const key = digest(`${endpoint}\n${semantic.toString()}`);
+    const inflightKey = `${key}:${digest(decode.key)}`;
 
-    const cached = await this.#readCache(key, signal);
-    if (cached === undefined) await this.#awaitPendingCacheDelete(key, signal);
+    const cached = useCache ? await this.#readCache(key, signal) : undefined;
     if (cached !== undefined) {
       if (encoder.encode(cached).byteLength > this.#maxResponseBytes) {
-        await this.#invalidateCache(key, signal);
+        await this.#invalidateCache(key);
       } else {
         try {
-          validate?.(cached);
-          return cached;
+          return decode.decode(cached);
         } catch (error) {
           if (error instanceof ResponseTooLargeError || error instanceof AbortedError) throw error;
-          await this.#invalidateCache(key, signal);
+          await this.#invalidateCache(key);
         }
       }
     }
 
-    let operation = this.#inflight.get(key);
-    if (operation === undefined) {
-      const controller = new AbortController();
-      operation = { controller, subscribers: 0, settled: false, promise: Promise.resolve("") };
-      this.#inflight.set(key, operation);
-      operation.promise = this.#execute(endpoint, parameters, key, controller.signal, validate);
-      const tracked = operation;
-      void operation.promise.then(
-        () => this.#settle(key, tracked),
-        () => this.#settle(key, tracked),
-      );
+    const existing = this.#inflight.get(inflightKey);
+    if (existing !== undefined) {
+      // The decoder identity is part of the in-flight key, so coalesced subscribers
+      // observe the same runtime value type and validation context.
+      return this.#subscribe(inflightKey, existing, signal) as Promise<TValue>;
     }
-    return this.#subscribe(key, operation, signal);
+
+    const controller = new AbortController();
+    const operation: InflightRequest<TValue> = {
+      controller,
+      subscribers: 0,
+      settled: false,
+      promise: this.#execute(endpoint, parameters, key, controller.signal, decode.decode, useCache),
+    };
+    this.#inflight.set(inflightKey, operation);
+    void operation.promise.then(
+      () => this.#settle(inflightKey, operation),
+      () => this.#settle(inflightKey, operation),
+    );
+    return this.#subscribe(inflightKey, operation, signal);
   }
 
   async #readCache(key: string, signal?: AbortSignal): Promise<string | undefined> {
@@ -275,39 +297,91 @@ export class Transport {
     }
   }
 
-  async #invalidateCache(key: string, signal?: AbortSignal): Promise<void> {
+  async #invalidateCache(key: string): Promise<void> {
     this.#invalidCacheKeys.add(key);
-    const pending = this.#pendingCacheDeletes.get(key);
-    if (pending !== undefined) {
-      await waitWithAbort(pending, signal);
-      return;
-    }
+    if (this.#pendingCacheDeletes.has(key)) return;
+    this.#beginCacheMutation(key);
     if (this.#cache?.delete === undefined || this.#pendingCacheDeletes.size >= INVALID_CACHE_KEY_LIMIT) return;
 
-    const deletion = this.#cache.delete(key).catch(() => {
-      // The bounded local bypass still prevents immediate reuse when deletion fails.
-    });
+    // Serialize cache mutations in the background, but never make the API request
+    // wait for an older, potentially stalled cache write.
+    const pendingMutation = this.#pendingCacheMutationsByKey.get(key);
+    const deletion = this.#deleteCacheAfterMutation(key, pendingMutation);
     this.#pendingCacheDeletes.set(key, deletion);
+    this.#pendingCacheMutationsByKey.set(key, deletion);
     void this.#clearPendingCacheDelete(key, deletion);
-    await waitWithAbort(deletion, signal);
+  }
+
+  async #deleteCacheAfterMutation(key: string, pendingMutation?: Promise<void>): Promise<void> {
+    await pendingMutation;
+    await this.#deleteCache(key);
+  }
+
+  async #deleteCache(key: string): Promise<void> {
+    try {
+      await this.#cache?.delete?.(key);
+    } catch {
+      // The bounded local bypass still prevents immediate reuse when deletion fails.
+    }
   }
 
   async #clearPendingCacheDelete(key: string, deletion: Promise<void>): Promise<void> {
     await deletion;
     if (this.#pendingCacheDeletes.get(key) === deletion) this.#pendingCacheDeletes.delete(key);
+    if (this.#pendingCacheMutationsByKey.get(key) === deletion) this.#pendingCacheMutationsByKey.delete(key);
   }
 
-  async #awaitPendingCacheDelete(key: string, signal?: AbortSignal): Promise<void> {
-    const pending = this.#pendingCacheDeletes.get(key);
-    if (pending !== undefined) await waitWithAbort(pending, signal);
+  #beginCacheMutation(key: string): object {
+    const token = {};
+    this.#latestCacheMutation.delete(key);
+    this.#latestCacheMutation.set(key, token);
+    while (this.#latestCacheMutation.size > CACHE_MUTATION_TOKEN_LIMIT) {
+      const oldest = this.#latestCacheMutation.keys().next();
+      if (oldest.done) break;
+      this.#latestCacheMutation.delete(oldest.value);
+    }
+    return token;
   }
 
-  #settle(key: string, operation: InflightRequest): void {
+  #writeCache(key: string, body: string): void {
+    if (this.#cache === undefined) return;
+    // Even when the write queue is full, mark this response as newer so an
+    // older pending write cannot later publish stale data for the same key.
+    const token = this.#beginCacheMutation(key);
+    if (this.#pendingCacheWrites.size >= PENDING_CACHE_WRITE_LIMIT) return;
+    const pendingMutation = this.#pendingCacheMutationsByKey.get(key);
+    const write = this.#performCacheWrite(key, body, token, pendingMutation);
+    this.#pendingCacheWrites.add(write);
+    this.#pendingCacheMutationsByKey.set(key, write);
+    void write.then(() => {
+      this.#pendingCacheWrites.delete(write);
+      if (this.#pendingCacheMutationsByKey.get(key) === write) this.#pendingCacheMutationsByKey.delete(key);
+    });
+  }
+
+  async #performCacheWrite(key: string, body: string, token: object, pendingMutation?: Promise<void>): Promise<void> {
+    await pendingMutation;
+    try {
+      await this.#cache?.set(key, body);
+      if (this.#latestCacheMutation.get(key) === token) {
+        this.#latestCacheMutation.delete(key);
+        this.#invalidCacheKeys.delete(key);
+      } else {
+        // This write was superseded while it was pending. Remove its potentially
+        // stale value without affecting request completion.
+        await this.#deleteCache(key);
+      }
+    } catch {
+      // Cache writes are asynchronous best effort and must never reject a request.
+    }
+  }
+
+  #settle(key: string, operation: InflightRequest<unknown>): void {
     operation.settled = true;
     if (this.#inflight.get(key) === operation) this.#inflight.delete(key);
   }
 
-  #subscribe(key: string, operation: InflightRequest, signal?: AbortSignal): Promise<string> {
+  #subscribe<TValue>(key: string, operation: InflightRequest<TValue>, signal?: AbortSignal): Promise<TValue> {
     if (signal?.aborted === true) {
       if (operation.subscribers === 0 && !operation.settled) {
         if (this.#inflight.get(key) === operation) this.#inflight.delete(key);
@@ -317,7 +391,7 @@ export class Transport {
     }
 
     operation.subscribers += 1;
-    return new Promise<string>((resolve, reject) => {
+    return new Promise<TValue>((resolve, reject) => {
       let finished = false;
       const finish = (aborted: boolean, complete: () => void): void => {
         if (finished) return;
@@ -339,13 +413,14 @@ export class Transport {
     });
   }
 
-  async #execute(
+  async #execute<TValue>(
     endpoint: Endpoint,
     parameters: Readonly<Record<string, string>>,
     cacheKey: string,
     operationSignal: AbortSignal,
-    validate?: ResponseValidator,
-  ): Promise<string> {
+    decode: ResponseDecoder<TValue>["decode"],
+    useCache: boolean,
+  ): Promise<TValue> {
     let lastError: Error = new NetworkError();
     for (let attempt = 1; attempt <= this.#maxAttempts; attempt += 1) {
       if (operationSignal.aborted) throw new AbortedError();
@@ -368,30 +443,21 @@ export class Transport {
         const form = new URLSearchParams({ db: "pubmed", ...parameters, tool: this.#tool, email: this.#email });
         if (this.#apiKey !== undefined) form.set("api_key", this.#apiKey);
         const path = `${ORIGIN}${endpoint}.fcgi`;
-        const encodedForm = form.toString();
-        const url = `${path}?${encodedForm}`;
-        const usePost = url.length > 1_800 || encoder.encode(encodedForm).byteLength > 1_500;
-        const response = await this.#fetch(usePost ? path : url, {
-          method: usePost ? "POST" : "GET",
-          ...(usePost ? { headers: { "content-type": "application/x-www-form-urlencoded" }, body: encodedForm } : {}),
+        const response = await this.#fetch(path, {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: form.toString(),
           signal: controller.signal,
         });
         safeEvent(this.#onEvent, { type: "request", endpoint, status: response.status, durationMs: Date.now() - started, attempt });
         if (response.ok) {
           const body = await readCapped(response, this.#maxResponseBytes);
           if (endpoint === "efetch" && /<(?:ERROR|Error)>[\s\S]*(?:history|webenv|query\s*key)/i.test(body)) throw new CursorExpiredError();
-          validate?.(body);
+          const value = decode(body);
           if (operationSignal.aborted) throw new AbortedError();
-          let cached = false;
-          try {
-            await this.#cache?.set(cacheKey, body);
-            cached = this.#cache !== undefined;
-          } catch {
-            // Cache writes are best effort.
-          }
-          if (cached) this.#invalidCacheKeys.delete(cacheKey);
+          if (useCache) this.#writeCache(cacheKey, body);
           if (operationSignal.aborted) throw new AbortedError();
-          return body;
+          return value;
         }
         discardBody(response);
 

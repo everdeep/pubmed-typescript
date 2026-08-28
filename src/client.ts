@@ -151,12 +151,57 @@ function decodeCursor(value: string): CursorData {
   }
 }
 
-function parseSearchResponse(body: string): SearchState {
+function stringLeaves(value: unknown): readonly string[] {
+  const found: string[] = [];
+  const pending: unknown[] = [value];
+  let visited = 0;
+  while (pending.length > 0 && found.length < 100 && visited < 1_000) {
+    const current = pending.pop();
+    visited += 1;
+    if (typeof current === "string") {
+      const normalized = current.trim();
+      if (normalized !== "") found.push(normalized);
+      continue;
+    }
+    if (Array.isArray(current)) {
+      for (const item of current) {
+        if (pending.length >= 1_000) break;
+        pending.push(item);
+      }
+      continue;
+    }
+    const record = object(current);
+    if (record === undefined) continue;
+    for (const key in record) {
+      if (pending.length >= 1_000) break;
+      if (Object.prototype.hasOwnProperty.call(record, key)) pending.push(record[key]);
+    }
+  }
+  return found;
+}
+
+function searchErrorMessages(value: unknown): readonly string[] {
+  const root = object(value);
+  const result = object(root?.esearchresult);
+  return [root?.error, root?.ERROR, root?.errorlist, result?.error, result?.ERROR, result?.errorlist]
+    .flatMap(stringLeaves);
+}
+
+function isExpiredHistoryMessage(message: string): boolean {
+  const historyReference = /(?:history|webenv|query(?:[\s_-]*key|\s*#))/i;
+  const unavailableReference = /(?:expired|invalid|unknown|missing|not\s+found|not\s+available|does\s+not\s+exist|cannot\s+find|could\s+not\s+find|unable\s+to\s+(?:find|obtain))/i;
+  return historyReference.test(message) && unavailableReference.test(message);
+}
+
+function parseSearchResponse(body: string, cursorContext = false): SearchState {
   let value: unknown;
   try {
     value = JSON.parse(body) as unknown;
   } catch {
     throw new InvalidResponseError("PubMed returned invalid search metadata");
+  }
+  if (cursorContext && searchErrorMessages(value).some(isExpiredHistoryMessage)) {
+    throw new CursorExpiredError();
   }
   const result = object(object(value)?.esearchresult);
   const countText = result?.count;
@@ -326,9 +371,12 @@ export class PubMedClient {
 
     for (let offset = 0; offset < unique.length; offset += this.#maxBatchSize) {
       const chunk = unique.slice(offset, offset + this.#maxBatchSize);
-      const validate = (body: string): void => { parseExpectedFetch(body, chunk); };
-      const body = await this.#transport.request("efetch", { id: chunk.join(","), retmode: "xml" }, options.signal, validate);
-      const parsed = parseExpectedFetch(body, chunk);
+      const parsed = await this.#transport.request(
+        "efetch",
+        { id: chunk.join(","), retmode: "xml" },
+        { key: "efetch-records-v1", decode: (body) => parseExpectedFetch(body, chunk) },
+        options.signal === undefined ? {} : { signal: options.signal },
+      );
       received.push(...parsed.records);
       warnings.push(...parsed.warnings);
       for (const warning of parsed.warnings) {
@@ -397,17 +445,26 @@ export class PubMedClient {
   async #searchQueryPage(options: SearchQueryOptions): Promise<SearchPage> {
     validateQueryOptions(options);
     const pageSize = positiveInteger(options.pageSize ?? DEFAULT_PAGE_SIZE, "pageSize", MAX_BATCH_SIZE);
-    const validate = (body: string): void => validateSearchState(parseSearchResponse(body), pageSize);
-    const response = await this.#transport.request("esearch", {
-      term: options.query,
-      retmode: "json",
-      usehistory: "y",
-      retstart: "0",
-      retmax: String(pageSize),
-      ...(options.sort === undefined ? {} : { sort: options.sort }),
-    }, options.signal, validate);
-    const state = parseSearchResponse(response);
-    validateSearchState(state, pageSize);
+    const state = await this.#transport.request(
+      "esearch",
+      {
+        term: options.query,
+        retmode: "json",
+        usehistory: "y",
+        retstart: "0",
+        retmax: String(pageSize),
+        ...(options.sort === undefined ? {} : { sort: options.sort }),
+      },
+      {
+        key: "esearch-initial-v1",
+        decode: (body) => {
+          const parsed = parseSearchResponse(body);
+          validateSearchState(parsed, pageSize);
+          return parsed;
+        },
+      },
+      { cache: false, ...(options.signal === undefined ? {} : { signal: options.signal }) },
+    );
     if (state.total === 0) {
       return {
         batch: { records: [], missingPmids: [], warnings: [], total: 0, nextCursor: null },
@@ -437,18 +494,27 @@ export class PubMedClient {
     const remainingWindow = SEARCH_WINDOW - cursor.offset;
     const requested = maxExpected === undefined ? cursor.pageSize : Math.min(cursor.pageSize, positiveInteger(maxExpected, "maxResults"));
     const retmax = Math.min(requested, cursor.total - cursor.offset, remainingWindow);
-    const validate = (body: string): void => validateSearchState(parseSearchResponse(body), retmax, cursor.total);
-    const response = await this.#transport.request("esearch", {
-      term: `#${cursor.queryKey}`,
-      WebEnv: cursor.webEnv,
-      query_key: cursor.queryKey,
-      retstart: String(cursor.offset),
-      retmax: String(retmax),
-      retmode: "json",
-      usehistory: "y",
-    }, signal, validate);
-    const state = parseSearchResponse(response);
-    validateSearchState(state, retmax, cursor.total);
+    const state = await this.#transport.request(
+      "esearch",
+      {
+        term: `#${cursor.queryKey}`,
+        WebEnv: cursor.webEnv,
+        query_key: cursor.queryKey,
+        retstart: String(cursor.offset),
+        retmax: String(retmax),
+        retmode: "json",
+        usehistory: "y",
+      },
+      {
+        key: `esearch-cursor-v1:${cursor.total}`,
+        decode: (body) => {
+          const parsed = parseSearchResponse(body, true);
+          validateSearchState(parsed, retmax, cursor.total);
+          return parsed;
+        },
+      },
+      { cache: false, ...(signal === undefined ? {} : { signal }) },
+    );
     const batch = await this.getMany(state.ids, { includeLinkOuts, ...(signal === undefined ? {} : { signal }) });
     const offset = cursor.offset + state.ids.length;
     return {
@@ -466,9 +532,13 @@ export class PubMedClient {
     const links = new Map<string, PubMedLink[]>();
     for (let offset = 0; offset < ids.length; offset += this.#maxBatchSize) {
       const chunk = ids.slice(offset, offset + this.#maxBatchSize);
-      const validate = (body: string): void => { parseLinkOutResponse(body); };
-      const xml = await this.#transport.request("elink", { id: chunk.join(","), cmd: "llinks", retmode: "xml" }, signal, validate);
-      for (const [id, found] of parseLinkOutResponse(xml)) links.set(id, [...(links.get(id) ?? []), ...found]);
+      const parsed = await this.#transport.request(
+        "elink",
+        { id: chunk.join(","), cmd: "llinks", retmode: "xml" },
+        { key: "elink-linkouts-v1", decode: parseLinkOutResponse },
+        signal === undefined ? {} : { signal },
+      );
+      for (const [id, found] of parsed) links.set(id, [...(links.get(id) ?? []), ...found]);
     }
     return records.map((record) => record.pmid === undefined ? record : withLinks(record, links.get(record.pmid) ?? []));
   }

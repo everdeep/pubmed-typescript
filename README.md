@@ -53,7 +53,7 @@ if (first.nextCursor) {
 }
 ```
 
-Cursors are opaque, versioned, contain no client credentials, and use NCBI search history. They are temporary and can produce `CursorExpiredError`. Malformed cursors produce `CursorInvalidError`.
+Cursors are versioned, base64url-encoded, unsigned, implementation-specific continuation state backed by NCBI search history. Treat them as untrusted values: they are validated when consumed but are not encrypted or authenticated, and their decoded shape is not a public API. They contain no client credentials. Cursors are temporary and can produce `CursorExpiredError`; malformed values produce `CursorInvalidError`.
 
 For progressive consumption, use `searchAll()`. `maxResults` is required so a caller must make the retrieval bound explicit:
 
@@ -80,7 +80,7 @@ PubMed ranking is retained. PubMed history retrieval has an approximately 10,000
 - `kind: "book"` — `PubmedBookArticle`
 - `kind: "unknown"` — a forward-compatible direct record type, retained with a warning
 
-Records are plain JSON-safe values. They expose ordered identifiers and `pmid`, `doi`, and `pmcid` conveniences; safe plain-text titles; structured abstracts and authors; affiliations and author identifiers; journal/book citation fields; partial calendar dates (never JavaScript `Date`); history; publication types; keywords; MeSH headings; and languages.
+Records are plain JSON-safe values. They expose ordered identifiers and `pmid`, `doi`, and `pmcid` conveniences; safe plain-text titles; structured abstracts and container-level `abstractCopyright`; structured authors; affiliations and author identifiers; journal/book citation fields; partial calendar dates (never JavaScript `Date`); history; publication types; keywords; MeSH headings; and languages. The deprecated `AbstractSection.copyright` field is retained for source compatibility but is not populated.
 
 ```ts
 if (record?.kind === "article") {
@@ -116,7 +116,7 @@ const cache = new MemoryCache({
 const client = new PubMedClient({ email, tool, cache });
 ```
 
-Only successful response bodies are cached. `MemoryCache` defaults to 500 entries and 25 MiB; its byte limit counts the UTF-8 bytes of both keys and values, and entries larger than the limit are skipped. Cache and in-flight coalescing keys are hashed and credential-free. Equivalent in-flight requests are always coalesced; canceling one subscriber does not cancel another subscriber.
+Eligible successful EFetch and ELink response bodies are cached. History-bearing ESearch requests bypass cache reads and writes because their continuation metadata can become stale; equivalent in-flight searches are still coalesced. Successful cache writes are bounded, asynchronous best effort and never delay API responses. `MemoryCache` defaults to 500 entries and 25 MiB; its byte limit counts the UTF-8 bytes of both keys and values, and entries larger than the limit are skipped. Cache and in-flight coalescing keys are hashed and credential-free. Equivalent in-flight requests are always coalesced; canceling one subscriber does not cancel another subscriber.
 
 ## Rate and transport policy
 
@@ -133,7 +133,7 @@ Conservative defaults:
 
 A process-shared FIFO limiter stays below NCBI ceilings: approximately 2.8 requests/second without a key and 9 requests/second with a key (below NCBI's 3/10 limits). These rate ceilings cannot be raised. `RateLimitCoordinator` can add distributed coordination and receives only a non-reversible credential fingerprint, never the API key. HTTP 429 `Retry-After` pauses the shared and distributed bucket. Server-directed cooldowns are conservatively capped at five minutes; larger values publish that bounded cooldown and stop automatic retry rather than scheduling an excessive timer.
 
-The client retries network failures, timeouts, HTTP 408, 429, and 5xx responses with exponential full jitter. Other 4xx responses and XML/JSON parse failures are not retried. Long requests automatically use POST. Response bodies are capped while streaming.
+The client retries network failures, timeouts, HTTP 408, 429, and 5xx responses with exponential full jitter. Other 4xx responses and XML/JSON parse failures are not retried. Every request uses an `application/x-www-form-urlencoded` POST to a fixed NCBI endpoint; parameters and credentials are never placed in the URL. Response bodies are capped while streaming.
 
 There is no default logging. An optional `onEvent` callback receives sanitized request/retry/queue/cooldown/parse events. Callback exceptions are ignored. Events and typed errors do not include API keys, email addresses, queries, request bodies, or raw responses.
 

@@ -36,6 +36,7 @@ export interface AbstractSection {
   readonly text: string;
   readonly label?: string;
   readonly category?: string;
+  /** @deprecated Copyright applies to the full abstract; use BasePubMedRecord.abstractCopyright. */
   readonly copyright?: string;
 }
 
@@ -130,6 +131,7 @@ export interface BasePubMedRecord {
   readonly pmcid?: string;
   readonly title?: string;
   readonly abstract: readonly AbstractSection[];
+  readonly abstractCopyright?: string;
   readonly authors: readonly PubMedAuthor[];
   readonly languages: readonly string[];
   readonly publicationTypes: readonly string[];

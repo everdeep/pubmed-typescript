@@ -77,15 +77,18 @@ describe("cache, coordination, and coalescing", () => {
     expect(JSON.stringify(buckets)).not.toContain(apiKey);
   });
 
-  it("automatically POSTs oversized payloads to the fixed NCBI endpoint", async () => {
+  it("always form-POSTs parameters to the fixed NCBI endpoint", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ esearchresult: { count: "0", querykey: "0", idlist: [] } })));
     const client = new PubMedClient({ email: "a@example.test", tool: "tests", apiKey: "post-key", fetch: fetchMock });
-    await client.search({ query: "x".repeat(2_000) });
+    await client.search({ query: "private query" });
     const call = fetchMock.mock.calls[0];
     expect(call?.[0]).toBe("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi");
     expect(call?.[1]?.method).toBe("POST");
-    expect(String(call?.[1]?.body)).toContain("tool=tests");
-    expect(String(call?.[1]?.body)).toContain("email=a%40example.test");
-    expect(String(call?.[1]?.body)).toContain("api_key=post-key");
+    expect(call?.[1]?.headers).toEqual({ "content-type": "application/x-www-form-urlencoded" });
+    const parameters = new URLSearchParams(String(call?.[1]?.body));
+    expect(parameters.get("term")).toBe("private query");
+    expect(parameters.get("tool")).toBe("tests");
+    expect(parameters.get("email")).toBe("a@example.test");
+    expect(parameters.get("api_key")).toBe("post-key");
   });
 });

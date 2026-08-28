@@ -381,8 +381,7 @@ function abstracts(value: unknown, rawXml: string): readonly AbstractSection[] {
     if (sectionText === undefined) return [];
     const label = attribute(section, "Label");
     const category = attribute(section, "NlmCategory");
-    const copyright = attribute(section, "CopyrightInformation");
-    return [{ text: sectionText, ...(label === undefined ? {} : { label }), ...(category === undefined ? {} : { category }), ...(copyright === undefined ? {} : { copyright }) }];
+    return [{ text: sectionText, ...(label === undefined ? {} : { label }), ...(category === undefined ? {} : { category }) }];
   });
 }
 
@@ -502,6 +501,8 @@ function parseArticle(root: Record<string, unknown>, rawXml: string): PubMedArti
   const title = rawElementText(rawXml, "ArticleTitle") ?? text(at(article, "ArticleTitle"));
   const vernacularTitle = text(at(article, "VernacularTitle"));
   const citationStatus = attribute(citation, "Status");
+  const abstractNode = at(article, "Abstract");
+  const abstractCopyright = text(at(abstractNode, "CopyrightInformation"));
   const journal = {
     ...(journalTitle === undefined ? {} : { title: journalTitle }),
     ...(isoAbbreviation === undefined ? {} : { isoAbbreviation }),
@@ -519,7 +520,8 @@ function parseArticle(root: Record<string, unknown>, rawXml: string): PubMedArti
     source: json(root) as JsonObject,
     identifiers: ids,
     links: canonicalLinks(ids),
-    abstract: abstracts(at(article, "Abstract"), rawXml),
+    abstract: abstracts(abstractNode, rawXml),
+    ...(abstractCopyright === undefined ? {} : { abstractCopyright }),
     authors: authors(at(article, "AuthorList")),
     languages: list(at(article, "Language")).flatMap((item) => text(item) ?? []),
     publicationTypes: list(at(at(article, "PublicationTypeList"), "PublicationType")).flatMap((item) => text(item) ?? []),
@@ -547,6 +549,8 @@ function parseBook(root: Record<string, unknown>, rawXml: string): PubMedBookRec
   const publisherLocation = text(at(publisher, "PublisherLocation"));
   const edition = text(at(bookNode, "Edition"));
   const title = rawElementText(rawXml, "ArticleTitle") ?? text(at(document, "ArticleTitle"));
+  const abstractNode = at(document, "Abstract");
+  const abstractCopyright = text(at(abstractNode, "CopyrightInformation"));
   return {
     kind: "book",
     recordType: "PubmedBookArticle",
@@ -554,7 +558,8 @@ function parseBook(root: Record<string, unknown>, rawXml: string): PubMedBookRec
     source: json(root) as JsonObject,
     identifiers: ids,
     links: canonicalLinks(ids),
-    abstract: abstracts(at(document, "Abstract"), rawXml),
+    abstract: abstracts(abstractNode, rawXml),
+    ...(abstractCopyright === undefined ? {} : { abstractCopyright }),
     authors: authors(at(document, "AuthorList")),
     languages: list(at(document, "Language")).flatMap((item) => text(item) ?? []),
     publicationTypes: list(at(at(document, "PublicationTypeList"), "PublicationType")).flatMap((item) => text(item) ?? []),

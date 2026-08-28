@@ -25,6 +25,10 @@ function searchResponse(count: number, ids: readonly string[]): Response {
   return jsonResponse({ esearchresult: { count: String(count), webenv: "history-token", querykey: "1", idlist: ids } });
 }
 
+function requestParameters(init?: RequestInit): URLSearchParams {
+  return new URLSearchParams(String(init?.body ?? ""));
+}
+
 describe("PubMedClient", () => {
   it("validates identity, PMIDs, and runtime request options without consulting the environment", async () => {
     expect(() => new PubMedClient({ email: "", tool: "test" })).toThrow(ValidationError);
@@ -46,8 +50,8 @@ describe("PubMedClient", () => {
     const client = new PubMedClient({ email: "a@example.test", tool: "tests", apiKey: "order-key", fetch: fetchMock });
     const result = await client.getMany(["2", "1", "2", "3"]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    const requested = String(fetchMock.mock.calls[0]?.[0]);
-    expect(requested).toContain("id=2%2C1%2C3");
+    const requested = requestParameters(fetchMock.mock.calls[0]?.[1]);
+    expect(requested.get("id")).toBe("2,1,3");
     expect(result.records.map((record) => record.pmid)).toEqual(["2", "1", "2"]);
     expect(result.missingPmids).toEqual(["3"]);
   });
@@ -61,13 +65,14 @@ describe("PubMedClient", () => {
     await expect(client.getMany(["1"], { signal: controller.signal })).rejects.toBeInstanceOf(AbortedError);
   });
 
-  it("searches with history and resumes an opaque cursor in ranking order", async () => {
-    const fetchMock = vi.fn<typeof fetch>(async (input) => {
-      const value = String(input);
-      if (value.includes("esearch.fcgi") && value.includes("retstart=2")) return searchResponse(3, ["7"]);
-      if (value.includes("esearch.fcgi")) return searchResponse(3, ["9", "8"]);
-      if (value.includes("id=9%2C8")) return new Response(setXml(articleXml("9"), articleXml("8")));
-      if (value.includes("id=7")) return new Response(setXml(articleXml("7")));
+  it("searches with history and resumes an encoded cursor in ranking order", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const endpoint = String(input);
+      const parameters = requestParameters(init);
+      if (endpoint.includes("esearch.fcgi") && parameters.get("retstart") === "2") return searchResponse(3, ["7"]);
+      if (endpoint.includes("esearch.fcgi")) return searchResponse(3, ["9", "8"]);
+      if (parameters.get("id") === "9,8") return new Response(setXml(articleXml("9"), articleXml("8")));
+      if (parameters.get("id") === "7") return new Response(setXml(articleXml("7")));
       throw new Error("unexpected mocked request");
     });
     const client = new PubMedClient({ email: "a@example.test", tool: "tests", apiKey: "cursor-key", fetch: fetchMock });
@@ -80,17 +85,18 @@ describe("PubMedClient", () => {
     const second = await client.search({ cursor: first.nextCursor ?? "" });
     expect(second.records.map((record) => record.pmid)).toEqual(["7"]);
     expect(second.nextCursor).toBeNull();
-    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("retstart=2"))).toBe(true);
+    expect(fetchMock.mock.calls.some(([, init]) => requestParameters(init).get("retstart") === "2")).toBe(true);
     await expect(client.search({ cursor: "not a cursor" })).rejects.toBeInstanceOf(CursorInvalidError);
   });
 
   it("streams search batches up to required maxResults and guards the retrieval window", async () => {
-    const fetchMock = vi.fn<typeof fetch>(async (input) => {
-      const value = String(input);
-      if (value.includes("esearch.fcgi") && value.includes("retstart=2")) return searchResponse(3, ["3"]);
-      if (value.includes("esearch.fcgi") && value.includes("term=normal")) return searchResponse(3, ["1", "2"]);
-      if (value.includes("esearch.fcgi")) return searchResponse(10_001, ["1", "2"]);
-      if (value.includes("id=1%2C2")) return new Response(setXml(articleXml("1"), articleXml("2")));
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const endpoint = String(input);
+      const parameters = requestParameters(init);
+      if (endpoint.includes("esearch.fcgi") && parameters.get("retstart") === "2") return searchResponse(3, ["3"]);
+      if (endpoint.includes("esearch.fcgi") && parameters.get("term") === "normal") return searchResponse(3, ["1", "2"]);
+      if (endpoint.includes("esearch.fcgi")) return searchResponse(10_001, ["1", "2"]);
+      if (parameters.get("id") === "1,2") return new Response(setXml(articleXml("1"), articleXml("2")));
       return new Response(setXml(articleXml("3")));
     });
     const client = new PubMedClient({ email: "a@example.test", tool: "tests", apiKey: "stream-key", fetch: fetchMock });

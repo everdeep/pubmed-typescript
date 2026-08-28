@@ -26,6 +26,8 @@ describe("parsePubMedXml", () => {
       { text: "Why > what.", label: "BACKGROUND", category: "BACKGROUND" },
       { text: "It worked.", label: "RESULTS" },
     ]);
+    expect(article.abstractCopyright).toBe("© 2024 Article Publisher");
+    expect(article.abstract.every((section) => section.copyright === undefined)).toBe(true);
     expect(article.authors).toHaveLength(2);
     expect(article.authors[0]).toMatchObject({ type: "personal", fullName: "Jane Doe", orcid: "0000-0001-2345-6789" });
     expect(article.authors[1]).toMatchObject({ type: "collective", name: "Study Group" });
@@ -38,6 +40,9 @@ describe("parsePubMedXml", () => {
     expect(book?.kind).toBe("book");
     if (book?.kind !== "book") throw new Error("expected book");
     expect(book.title).toBe("Book chapter");
+    expect(book.abstract).toEqual([{ text: "Book summary." }]);
+    expect(book.abstractCopyright).toBe("© 2024 Book Publisher");
+    expect(book.abstract.every((section) => section.copyright === undefined)).toBe(true);
     expect(book.book).toMatchObject({ title: "Handbook", publisher: "Publisher", isbn: ["978-1"] });
 
     const unknown = parsed.records[2];
