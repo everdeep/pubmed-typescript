@@ -213,6 +213,47 @@ describe("review regressions", () => {
     expect(linkDeletes).toHaveBeenCalledTimes(1);
   });
 
+  it("does not return or cache PMID-less recognized records or PubMed error elements", async () => {
+    const bodies = [
+      setXml("<PubmedArticle><MedlineCitation><Article><ArticleTitle>Missing PMID</ArticleTitle></Article></MedlineCitation></PubmedArticle>"),
+      setXml("<ERROR>Invalid uid 1</ERROR>"),
+    ];
+
+    for (const [index, body] of bodies.entries()) {
+      const cache: CacheAdapter = {
+        async get(): Promise<string | undefined> { return undefined; },
+        set: vi.fn<CacheAdapter["set"]>(async () => {}),
+      };
+      const client = new PubMedClient({
+        email: "a@example.test",
+        tool: "tests",
+        apiKey: `invalid-fetch-record-${index}`,
+        cache,
+        fetch: vi.fn<typeof fetch>(async () => new Response(body)),
+        maxAttempts: 1,
+      });
+
+      await expect(client.get("1")).rejects.toBeInstanceOf(InvalidResponseError);
+      expect(cache.set).not.toHaveBeenCalled();
+    }
+  });
+
+  it("does not return an unmatched forward-compatible record from get", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(setXml("<FuturePubmedRecord><Value>future</Value></FuturePubmedRecord>")));
+    const client = new PubMedClient({
+      email: "a@example.test",
+      tool: "tests",
+      apiKey: "unmatched-forward-record",
+      fetch: fetchMock,
+    });
+
+    await expect(client.get("1")).resolves.toBeNull();
+    const batch = await client.getMany(["1"]);
+    expect(batch.records).toEqual([expect.objectContaining({ kind: "unknown", recordType: "FuturePubmedRecord" })]);
+    expect(batch.missingPmids).toEqual(["1"]);
+    expect(batch.warnings).toEqual([expect.objectContaining({ code: "UNKNOWN_RECORD", recordType: "FuturePubmedRecord" })]);
+  });
+
   it("does not cache malformed successful network bodies", async () => {
     const cache: CacheAdapter = {
       async get(): Promise<string | undefined> { return undefined; },
@@ -439,6 +480,26 @@ describe("review regressions", () => {
     }
   });
 
+  it("retries oversized server-error responses instead of classifying them as successful-body overflow", async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response("x".repeat(1_024), {
+        status: 500,
+        headers: { "content-length": "1024" },
+      }))
+      .mockResolvedValueOnce(new Response(setXml(articleXml("1"))));
+    const client = new PubMedClient({
+      email: "a@example.test",
+      tool: "tests",
+      apiKey: "oversized-server-error",
+      fetch: fetchMock,
+      maxAttempts: 2,
+      maxResponseBytes: 512,
+    });
+
+    await expect(client.get("1")).resolves.toMatchObject({ pmid: "1" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("applies Retry-After cooldown and notifies the coordinator without credentials", async () => {
     const cooldowns: Array<{ bucket: RateLimitBucket; delayMs: number }> = [];
     const coordinator: RateLimitCoordinator = {
@@ -446,9 +507,17 @@ describe("review regressions", () => {
       async cooldown(bucket, delayMs): Promise<void> { cooldowns.push({ bucket, delayMs }); },
     };
     const fetchMock = vi.fn<typeof fetch>()
-      .mockResolvedValueOnce(new Response("slow down", { status: 429, headers: { "retry-after": "0" } }))
+      .mockResolvedValueOnce(new Response("x".repeat(1_024), { status: 429, headers: { "retry-after": "0", "content-length": "1024" } }))
       .mockResolvedValueOnce(new Response(setXml(articleXml("1"))));
-    const client = new PubMedClient({ email: "private@example.test", tool: "tests", apiKey: "retry-after-secret", fetch: fetchMock, rateLimitCoordinator: coordinator, maxAttempts: 2 });
+    const client = new PubMedClient({
+      email: "private@example.test",
+      tool: "tests",
+      apiKey: "retry-after-secret",
+      fetch: fetchMock,
+      rateLimitCoordinator: coordinator,
+      maxAttempts: 2,
+      maxResponseBytes: 512,
+    });
     await expect(client.get("1")).resolves.toMatchObject({ pmid: "1" });
     expect(cooldowns).toHaveLength(1);
     expect(cooldowns[0]?.delayMs).toBe(0);

@@ -160,6 +160,13 @@ async function sleep(delayMs: number, signal: AbortSignal): Promise<void> {
   }
 }
 
+function discardBody(response: Response): void {
+  if (response.body === null) return;
+  void response.body.cancel().catch(() => {
+    // Error response bodies are intentionally ignored; status and headers drive retries.
+  });
+}
+
 async function readCapped(response: Response, limitBytes: number): Promise<string> {
   const declared = Number(response.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > limitBytes) throw new ResponseTooLargeError(limitBytes);
@@ -370,8 +377,8 @@ export class Transport {
           signal: controller.signal,
         });
         safeEvent(this.#onEvent, { type: "request", endpoint, status: response.status, durationMs: Date.now() - started, attempt });
-        const body = await readCapped(response, this.#maxResponseBytes);
         if (response.ok) {
+          const body = await readCapped(response, this.#maxResponseBytes);
           if (endpoint === "efetch" && /<(?:ERROR|Error)>[\s\S]*(?:history|webenv|query\s*key)/i.test(body)) throw new CursorExpiredError();
           validate?.(body);
           if (operationSignal.aborted) throw new AbortedError();
@@ -386,6 +393,7 @@ export class Transport {
           if (operationSignal.aborted) throw new AbortedError();
           return body;
         }
+        discardBody(response);
 
         if (response.status === 429) {
           const serverDelay = retryAfter(response.headers);

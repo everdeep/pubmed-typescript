@@ -196,7 +196,15 @@ function parseExpectedFetch(body: string, expectedPmids: readonly string[]): Ret
   const expected = new Set(expectedPmids);
   const seen = new Set<string>();
   for (const record of parsed.records) {
-    if (record.pmid === undefined) continue;
+    if (record.pmid === undefined) {
+      if (record.kind !== "unknown") {
+        throw new InvalidResponseError("PubMed returned a recognized record without a PMID");
+      }
+      if (/^error(?:list)?$/i.test(record.recordType)) {
+        throw new InvalidResponseError("PubMed returned an error response instead of requested records");
+      }
+      continue;
+    }
     if (!expected.has(record.pmid) || seen.has(record.pmid)) {
       throw new InvalidResponseError("PubMed returned records that did not match the requested PMIDs");
     }
@@ -304,7 +312,7 @@ export class PubMedClient {
   public async get(pmid: string, options: RequestOptions = {}): Promise<PubMedRecord | null> {
     validatePmid(pmid);
     const batch = await this.getMany([pmid], options);
-    return batch.records[0] ?? null;
+    return batch.records.find((record) => record.pmid === pmid) ?? null;
   }
 
   public async getMany(pmids: readonly string[], options: RequestOptions = {}): Promise<BatchResult> {
