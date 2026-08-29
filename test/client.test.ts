@@ -30,6 +30,39 @@ function requestParameters(init?: RequestInit): URLSearchParams {
 }
 
 describe("PubMedClient", () => {
+  it("validates adapter and event callback shapes synchronously", () => {
+    const base = { email: "a@example.test", tool: "tests", fetch: vi.fn<typeof fetch>() };
+    const invalidOptions: readonly Record<string, unknown>[] = [
+      { ...base, cache: null },
+      { ...base, cache: [] },
+      { ...base, cache: {} },
+      { ...base, cache: { get: async () => undefined } },
+      { ...base, cache: { get: async () => undefined, set: async () => {}, delete: true } },
+      { ...base, rateLimitCoordinator: null },
+      { ...base, rateLimitCoordinator: {} },
+      { ...base, rateLimitCoordinator: { acquire: async () => {}, cooldown: "later" } },
+      { ...base, onEvent: {} },
+    ];
+
+    for (const options of invalidOptions) {
+      expect(() => Reflect.construct(PubMedClient, [options])).toThrow(ValidationError);
+    }
+
+    const cacheGet = vi.fn(async (): Promise<string | undefined> => undefined);
+    const cacheSet = vi.fn(async (): Promise<void> => {});
+    const acquire = vi.fn(async (): Promise<void> => {});
+    expect(() => new PubMedClient({
+      ...base,
+      cache: { get: cacheGet, set: cacheSet },
+      rateLimitCoordinator: { acquire },
+      onEvent: () => {},
+    })).not.toThrow();
+    expect(cacheGet).not.toHaveBeenCalled();
+    expect(cacheSet).not.toHaveBeenCalled();
+    expect(acquire).not.toHaveBeenCalled();
+    expect(base.fetch).not.toHaveBeenCalled();
+  });
+
   it("validates identity, PMIDs, and runtime request options without consulting the environment", async () => {
     expect(() => new PubMedClient({ email: "", tool: "test" })).toThrow(ValidationError);
     expect(() => new PubMedClient({ email: "a@example.test", tool: "" })).toThrow(ValidationError);
@@ -105,8 +138,13 @@ describe("PubMedClient", () => {
       ids.push(...batch.records.flatMap((record) => record.pmid ?? []));
     }
     expect(ids).toEqual(["1", "2", "3"]);
+    const callsBeforeOversized = fetchMock.mock.calls.length;
     const oversized = client.searchAll({ query: "too-many", maxResults: 10_001, pageSize: 2 });
     await expect(oversized[Symbol.asyncIterator]().next()).rejects.toBeInstanceOf(SearchLimitError);
+    const oversizedCalls = fetchMock.mock.calls.slice(callsBeforeOversized);
+    expect(oversizedCalls).toHaveLength(1);
+    expect(String(oversizedCalls[0]?.[0])).toContain("esearch.fcgi");
+    expect(oversizedCalls.some(([input]) => String(input).includes("efetch.fcgi"))).toBe(false);
   });
 
   it("adds safe LinkOut links without dereferencing them", async () => {

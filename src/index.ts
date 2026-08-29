@@ -40,6 +40,7 @@ export type {
   PubMedAuthor,
   PubMedBookRecord,
   PubMedClientOptions,
+  PubMedEndpoint,
   PubMedEvent,
   PubMedIdentifier,
   PubMedLink,

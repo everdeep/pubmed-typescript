@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { AbortedError, MemoryCache, PubMedClient } from "../src/index.js";
-import type { CacheAdapter, RateLimitBucket, RateLimitCoordinator } from "../src/index.js";
+import type { CacheAdapter, PubMedEvent, RateLimitBucket, RateLimitCoordinator } from "../src/index.js";
 
 const xml = `<PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>1</PMID><Article><ArticleTitle>One</ArticleTitle></Article></MedlineCitation><PubmedData><ArticleIdList><ArticleId IdType="pubmed">1</ArticleId></ArticleIdList></PubmedData></PubmedArticle></PubmedArticleSet>`;
 
@@ -28,9 +28,10 @@ describe("cache, coordination, and coalescing", () => {
   });
 
   it("coalesces equivalent in-flight requests and isolates subscriber cancellation", async () => {
+    const events: PubMedEvent[] = [];
     let release: ((response: Response) => void) | undefined;
     const fetchMock = vi.fn<typeof fetch>(async () => new Promise<Response>((resolve) => { release = resolve; }));
-    const client = new PubMedClient({ email: "a@example.test", tool: "tests", apiKey: "coalesce-key", fetch: fetchMock });
+    const client = new PubMedClient({ email: "a@example.test", tool: "tests", apiKey: "coalesce-key", fetch: fetchMock, onEvent: (event) => events.push(event) });
     const controller = new AbortController();
     const canceled = client.get("1", { signal: controller.signal });
     const survivor = client.get("1");
@@ -40,6 +41,101 @@ describe("cache, coordination, and coalescing", () => {
     await expect(canceled).rejects.toBeInstanceOf(AbortedError);
     await expect(survivor).resolves.toMatchObject({ pmid: "1" });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    const coalesced = events.find((event) => event.type === "request-coalesced");
+    if (coalesced?.type !== "request-coalesced") throw new Error("expected a coalescing event");
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "terminal-failure",
+      correlationId: coalesced.sharedCorrelationId,
+      errorCode: "ABORTED",
+    }));
+    expect(events).not.toContainEqual(expect.objectContaining({
+      type: "terminal-failure",
+      correlationId: coalesced.correlationId,
+    }));
+  });
+
+  it("emits correlated, sanitized cache, coalescing, response-size, and failure events", async () => {
+    const email = "private-observability@example.test";
+    const apiKey = "private-observability-api-key";
+    const query = "private-observability-query";
+    const rawResponseMarker = "private-observability-response";
+    const events: PubMedEvent[] = [];
+    const stored = new Map<string, string>();
+    const observedCacheKeys = new Set<string>();
+    const cache: CacheAdapter = {
+      async get(key): Promise<string | undefined> {
+        observedCacheKeys.add(key);
+        return stored.get(key);
+      },
+      async set(key, value): Promise<void> {
+        observedCacheKeys.add(key);
+        stored.set(key, value);
+      },
+    };
+    let release: ((response: Response) => void) | undefined;
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      if (String(input).includes("esearch.fcgi")) {
+        return new Response(JSON.stringify({
+          esearchresult: { count: "0", querykey: "0", idlist: [] },
+          diagnostic: rawResponseMarker,
+        }));
+      }
+      return new Promise<Response>((resolve) => { release = resolve; });
+    });
+    const client = new PubMedClient({ email, tool: "observability-tests", apiKey, cache, fetch: fetchMock, onEvent: (event) => events.push(event), maxAttempts: 1 });
+
+    const first = client.get("1");
+    const second = client.get("1");
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    release?.(new Response(xml));
+    await expect(Promise.all([first, second])).resolves.toHaveLength(2);
+    await vi.waitFor(() => expect(stored.size).toBe(1));
+    await expect(client.get("1")).resolves.toMatchObject({ pmid: "1" });
+    await expect(client.search({ query })).resolves.toMatchObject({ total: 0 });
+
+    const correlations = events.filter((event) => event.type === "correlation-id");
+    expect(correlations).toHaveLength(4);
+    expect(new Set(correlations.map((event) => event.correlationId)).size).toBe(4);
+    for (const event of correlations) expect(event.correlationId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+
+    const coalesced = events.find((event) => event.type === "request-coalesced");
+    expect(coalesced).toBeDefined();
+    if (coalesced?.type !== "request-coalesced") throw new Error("expected a coalescing event");
+    expect(coalesced.correlationId).not.toBe(coalesced.sharedCorrelationId);
+    expect(correlations.map((event) => event.correlationId)).toEqual(expect.arrayContaining([
+      coalesced.correlationId,
+      coalesced.sharedCorrelationId,
+    ]));
+    expect(events.some((event) => event.type === "cache-miss")).toBe(true);
+    expect(events.some((event) => event.type === "cache-hit")).toBe(true);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "response-bytes",
+      endpoint: "efetch",
+      bytes: new TextEncoder().encode(xml).byteLength,
+    }));
+
+    const serialized = JSON.stringify(events);
+    expect(serialized).not.toContain(email);
+    expect(serialized).not.toContain(apiKey);
+    expect(serialized).not.toContain(query);
+    expect(serialized).not.toContain(rawResponseMarker);
+    for (const cacheKey of observedCacheKeys) expect(serialized).not.toContain(cacheKey);
+
+    const failureEvents: PubMedEvent[] = [];
+    const failingClient = new PubMedClient({
+      email,
+      tool: "observability-tests",
+      apiKey: `${apiKey}-failure`,
+      fetch: vi.fn<typeof fetch>(async () => new Response(rawResponseMarker, { status: 400 })),
+      onEvent: (event) => failureEvents.push(event),
+      maxAttempts: 1,
+    });
+    await expect(failingClient.get("1")).rejects.toBeDefined();
+    const terminal = failureEvents.find((event) => event.type === "terminal-failure");
+    expect(terminal).toEqual(expect.objectContaining({ type: "terminal-failure", endpoint: "efetch", errorCode: "HTTP_ERROR" }));
+    if (terminal?.type !== "terminal-failure") throw new Error("expected a terminal failure event");
+    expect(failureEvents).toContainEqual(expect.objectContaining({ type: "correlation-id", correlationId: terminal.correlationId }));
+    expect(JSON.stringify(failureEvents)).not.toContain(rawResponseMarker);
   });
 
   it("honors cancellation while an asynchronous cache read is pending", async () => {

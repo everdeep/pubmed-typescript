@@ -104,6 +104,37 @@ function validateRequestOptions(options: unknown, name: string): asserts options
   }
 }
 
+function validateAdapterShapes(value: unknown): void {
+  const options = object(value);
+  if (options === undefined) throw new ValidationError("PubMedClient options are required");
+  if (options.cache !== undefined) {
+    const cache = object(options.cache);
+    if (
+      cache === undefined ||
+      typeof cache.get !== "function" ||
+      typeof cache.set !== "function" ||
+      (cache.delete !== undefined && typeof cache.delete !== "function")
+    ) {
+      throw new ValidationError("cache must provide get and set functions, and delete must be a function when provided");
+    }
+  }
+
+  if (options.rateLimitCoordinator !== undefined) {
+    const coordinator = object(options.rateLimitCoordinator);
+    if (
+      coordinator === undefined ||
+      typeof coordinator.acquire !== "function" ||
+      (coordinator.cooldown !== undefined && typeof coordinator.cooldown !== "function")
+    ) {
+      throw new ValidationError("rateLimitCoordinator must provide an acquire function, and cooldown must be a function when provided");
+    }
+  }
+
+  if (options.onEvent !== undefined && typeof options.onEvent !== "function") {
+    throw new ValidationError("onEvent must be a function");
+  }
+}
+
 function validateQueryOptions(options: SearchQueryOptions | SearchAllOptions): void {
   validateRequestOptions(options, "search options");
   if (typeof options.query !== "string" || options.query.trim() === "") throw new ValidationError("query is required");
@@ -326,6 +357,7 @@ export class PubMedClient {
 
   public constructor(options: PubMedClientOptions) {
     if (typeof options !== "object" || options === null) throw new ValidationError("PubMedClient options are required");
+    validateAdapterShapes(options);
     if (typeof options.email !== "string" || options.email.trim() === "") throw new ValidationError("email is required");
     if (typeof options.tool !== "string" || options.tool.trim() === "") throw new ValidationError("tool is required");
     if (options.apiKey !== undefined && (typeof options.apiKey !== "string" || options.apiKey.trim() === "")) {
@@ -417,15 +449,17 @@ export class PubMedClient {
     const requestedPageSize = positiveInteger(options.pageSize ?? DEFAULT_PAGE_SIZE, "pageSize", MAX_BATCH_SIZE);
     if (options.maxResults === 0) return;
     const pageSize = Math.min(requestedPageSize, options.maxResults);
-    let page = await this.#searchQueryPage({
+    const queryOptions: SearchQueryOptions = {
       query: options.query,
       pageSize,
       ...(options.sort === undefined ? {} : { sort: options.sort }),
       ...(options.includeLinkOuts === undefined ? {} : { includeLinkOuts: options.includeLinkOuts }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
-    });
-    const target = Math.min(options.maxResults, page.batch.total);
+    };
+    const state = await this.#fetchInitialSearchState(queryOptions, pageSize);
+    const target = Math.min(options.maxResults, state.total);
     if (target > SEARCH_WINDOW) throw new SearchLimitError();
+    let page = await this.#materializeInitialSearchPage(state, queryOptions, pageSize);
     let processed = 0;
     while (processed < target) {
       if (page.expectedPmids.length === 0) throw new InvalidResponseError("PubMed search paging made no progress");
@@ -445,7 +479,12 @@ export class PubMedClient {
   async #searchQueryPage(options: SearchQueryOptions): Promise<SearchPage> {
     validateQueryOptions(options);
     const pageSize = positiveInteger(options.pageSize ?? DEFAULT_PAGE_SIZE, "pageSize", MAX_BATCH_SIZE);
-    const state = await this.#transport.request(
+    const state = await this.#fetchInitialSearchState(options, pageSize);
+    return this.#materializeInitialSearchPage(state, options, pageSize);
+  }
+
+  async #fetchInitialSearchState(options: SearchQueryOptions, pageSize: number): Promise<SearchState> {
+    return this.#transport.request(
       "esearch",
       {
         term: options.query,
@@ -465,6 +504,13 @@ export class PubMedClient {
       },
       { cache: false, ...(options.signal === undefined ? {} : { signal: options.signal }) },
     );
+  }
+
+  async #materializeInitialSearchPage(
+    state: SearchState,
+    options: SearchQueryOptions,
+    pageSize: number,
+  ): Promise<SearchPage> {
     if (state.total === 0) {
       return {
         batch: { records: [], missingPmids: [], warnings: [], total: 0, nextCursor: null },

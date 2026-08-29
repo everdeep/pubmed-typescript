@@ -70,7 +70,7 @@ for await (const batch of client.searchAll({
 }
 ```
 
-PubMed ranking is retained. PubMed history retrieval has an approximately 10,000-record window. The client raises `SearchLimitError` instead of silently truncating an exhaustive request beyond that window. Automatic date partitioning is intentionally not part of v1.
+PubMed ranking is retained. PubMed history retrieval has an approximately 10,000-record window. The client checks ESearch metadata and raises `SearchLimitError` before fetching any records when the requested result target exceeds that window, instead of silently truncating. Automatic date partitioning is intentionally not part of v1.
 
 ## Records
 
@@ -118,6 +118,8 @@ const client = new PubMedClient({ email, tool, cache });
 
 Eligible successful EFetch and ELink response bodies are cached. History-bearing ESearch requests bypass cache reads and writes because their continuation metadata can become stale; equivalent in-flight searches are still coalesced. Successful cache writes are bounded, asynchronous best effort and never delay API responses. `MemoryCache` defaults to 500 entries and 25 MiB; its byte limit counts the UTF-8 bytes of both keys and values, and entries larger than the limit are skipped. Cache and in-flight coalescing keys are hashed and credential-free. Equivalent in-flight requests are always coalesced; canceling one subscriber does not cancel another subscriber.
 
+Custom cache adapters must be objects with async `get` and `set` functions; `delete`, when provided, must also be a function. Custom rate-limit coordinators must provide an async `acquire` function; `cooldown`, when provided, must be a function. Invalid adapter shapes and non-function `onEvent` values throw `ValidationError` synchronously when `PubMedClient` is constructed. Constructor validation checks method shapes only and does not invoke adapters.
+
 ## Rate and transport policy
 
 Conservative defaults:
@@ -135,7 +137,9 @@ A process-shared FIFO limiter stays below NCBI ceilings: approximately 2.8 reque
 
 The client retries network failures, timeouts, HTTP 408, 429, and 5xx responses with exponential full jitter. Other 4xx responses and XML/JSON parse failures are not retried. Every request uses an `application/x-www-form-urlencoded` POST to a fixed NCBI endpoint; parameters and credentials are never placed in the URL. Response bodies are capped while streaming.
 
-There is no default logging. An optional `onEvent` callback receives sanitized request/retry/queue/cooldown/parse events. Callback exceptions are ignored. Events and typed errors do not include API keys, email addresses, queries, request bodies, or raw responses.
+There is no default logging. An optional `onEvent` callback receives sanitized events for correlation IDs, cache hits/misses, in-flight coalescing, requests, response byte counts, retries, queue delays, cooldowns, parse warnings, and terminal failures. Each logical transport request gets a generated opaque correlation ID. A `request-coalesced` event links a joining request's ID to the shared operation's ID; IDs are not derived from request content. Request and retry events also carry correlation IDs when they belong to an HTTP operation. Terminal failures expose only a stable error code, not an error message.
+
+Callback exceptions are ignored. Events and typed errors never include API keys, email addresses, queries, request bodies, raw responses, or internal cache keys. Event payloads contain only bounded operational metadata such as endpoint, status, attempt, timing, byte count, error code, and opaque correlation IDs.
 
 ## Errors
 

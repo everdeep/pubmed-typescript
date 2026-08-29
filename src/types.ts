@@ -1,3 +1,5 @@
+import type { PubMedErrorCode } from "./errors.js";
+
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonObject | readonly JsonValue[];
 export interface JsonObject {
@@ -222,9 +224,16 @@ export interface RateLimitCoordinator {
   cooldown?(bucket: RateLimitBucket, delayMs: number): Promise<void>;
 }
 
+export type PubMedEndpoint = "esearch" | "efetch" | "elink";
+
 export type PubMedEvent =
-  | Readonly<{ type: "request"; endpoint: "esearch" | "efetch" | "elink"; status: number; durationMs: number; attempt: number }>
-  | Readonly<{ type: "retry"; endpoint: "esearch" | "efetch" | "elink"; attempt: number; delayMs: number; reason: "network" | "timeout" | "http" }>
+  | Readonly<{ type: "correlation-id"; endpoint: PubMedEndpoint; correlationId: string }>
+  | Readonly<{ type: "cache-hit" | "cache-miss"; endpoint: PubMedEndpoint; correlationId: string }>
+  | Readonly<{ type: "request-coalesced"; endpoint: PubMedEndpoint; correlationId: string; sharedCorrelationId: string }>
+  | Readonly<{ type: "response-bytes"; endpoint: PubMedEndpoint; correlationId: string; attempt: number; bytes: number }>
+  | Readonly<{ type: "terminal-failure"; endpoint: PubMedEndpoint; correlationId: string; errorCode: PubMedErrorCode | "UNKNOWN_ERROR" }>
+  | Readonly<{ type: "request"; endpoint: PubMedEndpoint; status: number; durationMs: number; attempt: number; correlationId?: string }>
+  | Readonly<{ type: "retry"; endpoint: PubMedEndpoint; attempt: number; delayMs: number; reason: "network" | "timeout" | "http"; correlationId?: string }>
   | Readonly<{ type: "queue-delay"; delayMs: number }>
   | Readonly<{ type: "rate-cooldown"; delayMs: number }>
   | Readonly<{ type: "parse-warning"; code: PubMedWarning["code"]; recordType?: string }>;
