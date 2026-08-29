@@ -1,5 +1,6 @@
 export { PubMedClient } from "./client.js";
 export { MemoryCache } from "./cache.js";
+export { formatCitation, formatCitations } from "./citation.js";
 export { parsePubMedXml } from "./parser.js";
 export {
   AbortedError,
@@ -27,6 +28,8 @@ export type {
   BasePubMedRecord,
   BatchResult,
   CacheAdapter,
+  CitationFormat,
+  CitationSource,
   CollectiveAuthor,
   JsonObject,
   JsonPrimitive,
@@ -45,6 +48,12 @@ export type {
   PubMedIdentifier,
   PubMedLink,
   PubMedRecord,
+  PubMedSummary,
+  PubMedSummaryAuthor,
+  PubMedSummaryBook,
+  PubMedSummaryHistoryEntry,
+  PubMedSummaryIdentifier,
+  PubMedSummaryJournal,
   PubMedWarning,
   PublicationDates,
   PublicationHistoryEntry,
@@ -56,5 +65,7 @@ export type {
   SearchCursorOptions,
   SearchOptions,
   SearchQueryOptions,
+  SummaryBatchResult,
+  SummaryRequestOptions,
   UnknownPubMedRecord,
 } from "./types.js";

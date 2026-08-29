@@ -169,6 +169,88 @@ export interface UnknownPubMedRecord extends BasePubMedRecord {
 
 export type PubMedRecord = PubMedArticleRecord | PubMedBookRecord | UnknownPubMedRecord;
 
+export interface PubMedSummaryAuthor {
+  readonly name: string;
+  readonly type?: string;
+  readonly clusterId?: string;
+}
+
+export interface PubMedSummaryIdentifier {
+  readonly type: string;
+  readonly value: string;
+  readonly numericType?: number;
+}
+
+export interface PubMedSummaryHistoryEntry {
+  readonly status: string;
+  readonly date: string;
+}
+
+export interface PubMedSummaryJournal {
+  readonly title?: string;
+  readonly abbreviation?: string;
+  readonly issn?: string;
+  readonly electronicIssn?: string;
+  readonly volume?: string;
+  readonly issue?: string;
+  readonly pages?: string;
+}
+
+export interface PubMedSummaryBook {
+  readonly title?: string;
+  readonly name?: string;
+  readonly chapter?: string;
+  readonly edition?: string;
+  readonly publisher?: string;
+  readonly location?: string;
+}
+
+/** Lightweight metadata returned by the PubMed ESummary endpoint. */
+export interface PubMedSummary {
+  readonly kind: "summary";
+  readonly uid: string;
+  readonly pmid: string;
+  /** The validated JSON object for this UID, retained for forward compatibility. */
+  readonly source: JsonObject;
+  readonly title?: string;
+  readonly sortTitle?: string;
+  readonly authors: readonly PubMedSummaryAuthor[];
+  readonly lastAuthor?: string;
+  readonly sortFirstAuthor?: string;
+  readonly journal?: PubMedSummaryJournal;
+  readonly book?: PubMedSummaryBook;
+  readonly publicationDate?: string;
+  readonly electronicPublicationDate?: string;
+  readonly sortPublicationDate?: string;
+  /** Electronic article locator, for example an article number instead of page range. */
+  readonly electronicLocationId?: string;
+  readonly sourceDate?: string;
+  readonly documentDate?: string;
+  readonly languages: readonly string[];
+  readonly publicationTypes: readonly string[];
+  readonly identifiers: readonly PubMedSummaryIdentifier[];
+  readonly history: readonly PubMedSummaryHistoryEntry[];
+  readonly doi?: string;
+  readonly pmcid?: string;
+  readonly recordStatus?: string;
+  readonly publicationStatus?: string;
+  readonly documentType?: string;
+  readonly medium?: string;
+  readonly edition?: string;
+  readonly publisher?: string;
+  readonly publisherLocation?: string;
+  readonly reportNumber?: string;
+  readonly availableFromUrl?: string;
+}
+
+export interface SummaryBatchResult {
+  readonly summaries: readonly PubMedSummary[];
+  readonly missingPmids: readonly string[];
+}
+
+export type CitationFormat = "ris" | "bibtex";
+export type CitationSource = PubMedArticleRecord | PubMedBookRecord | PubMedSummary;
+
 export interface BatchResult {
   readonly records: readonly PubMedRecord[];
   readonly missingPmids: readonly string[];
@@ -182,6 +264,10 @@ export interface SearchBatch extends BatchResult {
 
 export interface RequestOptions {
   readonly includeLinkOuts?: boolean;
+  readonly signal?: AbortSignal;
+}
+
+export interface SummaryRequestOptions {
   readonly signal?: AbortSignal;
 }
 
@@ -224,7 +310,7 @@ export interface RateLimitCoordinator {
   cooldown?(bucket: RateLimitBucket, delayMs: number): Promise<void>;
 }
 
-export type PubMedEndpoint = "esearch" | "efetch" | "elink";
+export type PubMedEndpoint = "esearch" | "esummary" | "efetch" | "elink";
 
 export type PubMedEvent =
   | Readonly<{ type: "correlation-id"; endpoint: PubMedEndpoint; correlationId: string }>

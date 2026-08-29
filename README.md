@@ -37,6 +37,26 @@ console.log(batch.warnings);
 
 PMIDs must be non-zero numeric strings. `getMany()` deduplicates network retrieval, uses batches of at most 200 IDs, and reconstructs caller order. Cancellation rejects the whole operation with `AbortedError`; it never returns a normal-looking partial result.
 
+## Retrieve summaries
+
+Use ESummary when you need lightweight metadata without full XML records:
+
+```ts
+const summary = await client.getSummary("38601234"); // PubMedSummary | null
+
+const batch = await client.getManySummaries([
+  "38601234",
+  "38300001",
+  "38601234",
+]);
+console.log(batch.summaries);     // follows caller order and retains duplicates
+console.log(batch.missingPmids);  // missing IDs in caller order
+```
+
+A summary includes normalized authors, journal or book metadata, publication dates, languages, publication types, identifiers, and DOI/PMCID conveniences when available. Its `source` property retains the validated JSON object returned for that UID so newer ESummary fields remain accessible. Optional malformed metadata is ignored, while invalid response envelopes or mismatched UIDs are rejected.
+
+Summary retrieval uses the same validation, batching, cancellation, response limits, caching, and in-flight coalescing policy as record retrieval.
+
 ## Search
 
 Native PubMed query syntax and sort values are passed to ESearch:
@@ -91,6 +111,22 @@ if (record?.kind === "article") {
 
 Every record includes `rawXml`, which is the exact direct-child XML fragment received from PubMed, without serialization or normalization. `source` retains parsed source data for fields not represented in the normalized surface.
 
+## Citation export
+
+Full article/book records and lightweight summaries can be serialized as RIS or BibTeX:
+
+```ts
+import { formatCitation, formatCitations } from "@everdeep/pubmed";
+
+const ris = formatCitation(record, "ris");
+const bibtex = formatCitation(summary, "bibtex");
+const bibliography = formatCitations([record, summary], "bibtex");
+```
+
+`formatCitation()` accepts `PubMedArticleRecord`, `PubMedBookRecord`, or `PubMedSummary`. `formatCitations()` preserves caller order and duplicates, separates entries with one blank line, gives repeated BibTeX keys deterministic occurrence suffixes, and returns an empty string for an empty input. Article sources produce RIS `JOUR` / BibTeX `article` entries; book chapters produce RIS `CHAP` / BibTeX `incollection` entries; whole books produce RIS `BOOK` / BibTeX `book` entries.
+
+Serialization is pure and deterministic. Fields use a fixed order, line breaks and control characters cannot inject RIS tags, and BibTeX-sensitive characters are escaped. Only available normalized metadata is emitted; this is a safe interchange export, not a citation-style or bibliography-rendering engine.
+
 ## Links and LinkOut
 
 Canonical HTTPS links for PubMed, DOI, and PMC are generated from source identifiers. Per-call LinkOut enrichment is opt-in:
@@ -116,7 +152,7 @@ const cache = new MemoryCache({
 const client = new PubMedClient({ email, tool, cache });
 ```
 
-Eligible successful EFetch and ELink response bodies are cached. History-bearing ESearch requests bypass cache reads and writes because their continuation metadata can become stale; equivalent in-flight searches are still coalesced. Successful cache writes are bounded, asynchronous best effort and never delay API responses. `MemoryCache` defaults to 500 entries and 25 MiB; its byte limit counts the UTF-8 bytes of both keys and values, and entries larger than the limit are skipped. Cache and in-flight coalescing keys are hashed and credential-free. Equivalent in-flight requests are always coalesced; canceling one subscriber does not cancel another subscriber.
+Eligible successful EFetch, ESummary, and ELink response bodies are cached. History-bearing ESearch requests bypass cache reads and writes because their continuation metadata can become stale; equivalent in-flight searches are still coalesced. Successful cache writes are bounded, asynchronous best effort and never delay API responses. `MemoryCache` defaults to 500 entries and 25 MiB; its byte limit counts the UTF-8 bytes of both keys and values, and entries larger than the limit are skipped. Cache and in-flight coalescing keys are hashed and credential-free. Equivalent in-flight requests are always coalesced; canceling one subscriber does not cancel another subscriber.
 
 Custom cache adapters must be objects with async `get` and `set` functions; `delete`, when provided, must also be a function. Custom rate-limit coordinators must provide an async `acquire` function; `cooldown`, when provided, must be a function. Invalid adapter shapes and non-function `onEvent` values throw `ValidationError` synchronously when `PubMedClient` is constructed. Constructor validation checks method shapes only and does not invoke adapters.
 

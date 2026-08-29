@@ -1,6 +1,6 @@
 import type { CacheAdapter, PubMedClientOptions, PubMedEvent } from "../types.js";
 
-export type Endpoint = "esearch" | "efetch" | "elink";
+export type Endpoint = "esearch" | "esummary" | "efetch" | "elink";
 
 export interface ResponseDecoder<TValue> {
   /** Stable identity for the decoded value type and validation context. */

@@ -9,18 +9,22 @@ import {
 } from "./errors.js";
 import { parsePubMedXml } from "./parser.js";
 import { safeEvent } from "./rate-limiter.js";
+import { parseESummaryJson } from "./summary.js";
 import { Transport } from "./transport.js";
 import type {
   BatchResult,
   PubMedClientOptions,
   PubMedLink,
   PubMedRecord,
+  PubMedSummary,
   PubMedWarning,
   RequestOptions,
   SearchAllOptions,
   SearchBatch,
   SearchOptions,
   SearchQueryOptions,
+  SummaryBatchResult,
+  SummaryRequestOptions,
 } from "./types.js";
 
 const DEFAULT_PAGE_SIZE = 20;
@@ -98,6 +102,17 @@ function validateRequestOptions(options: unknown, name: string): asserts options
   if (candidate === undefined) throw new ValidationError(`${name} must be an object`);
   if (candidate.includeLinkOuts !== undefined && typeof candidate.includeLinkOuts !== "boolean") {
     throw new ValidationError("includeLinkOuts must be a boolean");
+  }
+  if (candidate.signal !== undefined && !isAbortSignal(candidate.signal)) {
+    throw new ValidationError("signal must be an AbortSignal");
+  }
+}
+
+function validateSummaryRequestOptions(options: unknown): asserts options is SummaryRequestOptions {
+  const candidate = object(options);
+  if (candidate === undefined) throw new ValidationError("summary request options must be an object");
+  if (candidate.includeLinkOuts !== undefined) {
+    throw new ValidationError("includeLinkOuts is not supported for summary requests");
   }
   if (candidate.signal !== undefined && !isAbortSignal(candidate.signal)) {
     throw new ValidationError("signal must be an AbortSignal");
@@ -429,6 +444,38 @@ export class PubMedClient {
       records: ordered,
       missingPmids: input.filter((pmid) => !byPmid.has(pmid)),
       warnings,
+    };
+  }
+
+  public async getSummary(pmid: string, options: SummaryRequestOptions = {}): Promise<PubMedSummary | null> {
+    validatePmid(pmid);
+    const batch = await this.getManySummaries([pmid], options);
+    return batch.summaries[0] ?? null;
+  }
+
+  public async getManySummaries(pmids: readonly string[], options: SummaryRequestOptions = {}): Promise<SummaryBatchResult> {
+    if (!Array.isArray(pmids)) throw new ValidationError("pmids must be an array");
+    validateSummaryRequestOptions(options);
+    if (options.signal?.aborted === true) throw new AbortedError();
+    const input = pmids.map(validatePmid);
+    const unique = [...new Set(input)];
+    const received: PubMedSummary[] = [];
+
+    for (let offset = 0; offset < unique.length; offset += this.#maxBatchSize) {
+      const chunk = unique.slice(offset, offset + this.#maxBatchSize);
+      const summaries = await this.#transport.request(
+        "esummary",
+        { id: chunk.join(","), retmode: "json", version: "2.0" },
+        { key: "esummary-summaries-v1", decode: (body) => parseESummaryJson(body, chunk) },
+        options.signal === undefined ? {} : { signal: options.signal },
+      );
+      received.push(...summaries);
+    }
+
+    const byPmid = new Map(received.map((summary) => [summary.pmid, summary]));
+    return {
+      summaries: input.flatMap((pmid) => byPmid.get(pmid) ?? []),
+      missingPmids: input.filter((pmid) => !byPmid.has(pmid)),
     };
   }
 
