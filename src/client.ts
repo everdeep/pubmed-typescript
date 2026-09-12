@@ -102,6 +102,9 @@ function isAbortSignal(value: unknown): value is AbortSignal {
 function validateRequestOptions(options: unknown, name: string): asserts options is RequestOptions {
   const candidate = object(options);
   if (candidate === undefined) throw new ValidationError(`${name} must be an object`);
+  if (candidate.includeRawXml !== undefined && typeof candidate.includeRawXml !== "boolean") {
+    throw new ValidationError("includeRawXml must be a boolean");
+  }
   if (candidate.includeLinkOuts !== undefined && typeof candidate.includeLinkOuts !== "boolean") {
     throw new ValidationError("includeLinkOuts must be a boolean");
   }
@@ -113,6 +116,9 @@ function validateRequestOptions(options: unknown, name: string): asserts options
 function validateSummaryRequestOptions(options: unknown): asserts options is SummaryRequestOptions {
   const candidate = object(options);
   if (candidate === undefined) throw new ValidationError("summary request options must be an object");
+  if (candidate.includeRawXml !== undefined) {
+    throw new ValidationError("includeRawXml is not supported for summary requests");
+  }
   if (candidate.includeLinkOuts !== undefined) {
     throw new ValidationError("includeLinkOuts is not supported for summary requests");
   }
@@ -284,7 +290,8 @@ function validateSearchState(state: SearchState, expectedIds: number, offset = 0
 }
 
 function parseExpectedFetch(body: string, expectedPmids: readonly string[]): ReturnType<typeof parsePubMedXml> {
-  const parsed = parsePubMedXml(body);
+  // Shared decoders retain XML; each caller projects its own output after coalescing.
+  const parsed = parsePubMedXml(body, { includeRawXml: true });
   const expected = new Set(expectedPmids);
   const seen = new Set<string>();
   for (const record of parsed.records) {
@@ -369,12 +376,17 @@ function withLinks(record: PubMedRecord, extra: readonly PubMedLink[]): PubMedRe
 export class PubMedClient {
   readonly #transport: Transport;
   readonly #maxBatchSize: number;
+  readonly #includeRawXml: boolean;
   readonly #totalDriftPolicy: "error" | "warn";
   readonly #onEvent: PubMedClientOptions["onEvent"];
 
   public constructor(options: PubMedClientOptions) {
     if (typeof options !== "object" || options === null) throw new ValidationError("PubMedClient options are required");
     validateAdapterShapes(options);
+    if (options.includeRawXml !== undefined && typeof options.includeRawXml !== "boolean") {
+      throw new ValidationError("includeRawXml must be a boolean");
+    }
+    this.#includeRawXml = options.includeRawXml ?? false;
     if (options.totalDriftPolicy !== undefined && options.totalDriftPolicy !== "error" && options.totalDriftPolicy !== "warn") {
       throw new ValidationError('totalDriftPolicy must be "error" or "warn"');
     }
@@ -445,6 +457,10 @@ export class PubMedClient {
     }
     let ordered: readonly PubMedRecord[] = input.flatMap((pmid) => byPmid.get(pmid) ?? []);
     if (unknown.length > 0) ordered = [...ordered, ...unknown];
+    if (!(options.includeRawXml ?? this.#includeRawXml)) {
+      // Do not mutate records shared with other in-flight callers.
+      ordered = ordered.map(({ rawXml, ...record }) => record);
+    }
     if (options.includeLinkOuts === true && ordered.length > 0) ordered = await this.#enrich(ordered, options.signal);
     if (options.signal?.aborted) throw new AbortedError();
     return {
@@ -491,7 +507,7 @@ export class PubMedClient {
     validateRequestOptions(options, "search options");
     if ("cursor" in options) {
       if (typeof options.cursor !== "string" || options.cursor === "") throw new ValidationError("cursor must be a non-empty string");
-      return (await this.#searchCursorPage(options.cursor, options.includeLinkOuts === true, options.signal)).batch;
+      return (await this.#searchCursorPage(options.cursor, options)).batch;
     }
     validateQueryOptions(options);
     return (await this.#searchQueryPage(options)).batch;
@@ -508,6 +524,7 @@ export class PubMedClient {
       query: options.query,
       pageSize,
       ...(options.sort === undefined ? {} : { sort: options.sort }),
+      ...(options.includeRawXml === undefined ? {} : { includeRawXml: options.includeRawXml }),
       ...(options.includeLinkOuts === undefined ? {} : { includeLinkOuts: options.includeLinkOuts }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     };
@@ -524,8 +541,7 @@ export class PubMedClient {
       if (page.batch.nextCursor === null) throw new InvalidResponseError("PubMed search ended before the requested result count");
       page = await this.#searchCursorPage(
         page.batch.nextCursor,
-        options.includeLinkOuts === true,
-        options.signal,
+        options,
         target - processed,
       );
     }
@@ -572,10 +588,7 @@ export class PubMedClient {
         expectedPmids: [],
       };
     }
-    const batch = await this.getMany(state.ids, {
-      ...(options.includeLinkOuts === undefined ? {} : { includeLinkOuts: options.includeLinkOuts }),
-      ...(options.signal === undefined ? {} : { signal: options.signal }),
-    });
+    const batch = await this.getMany(state.ids, options);
     const offset = state.ids.length;
     return {
       batch: {
@@ -589,7 +602,8 @@ export class PubMedClient {
     };
   }
 
-  async #searchCursorPage(cursorValue: string, includeLinkOuts: boolean, signal?: AbortSignal, maxExpected?: number): Promise<SearchPage> {
+  async #searchCursorPage(cursorValue: string, options: RequestOptions, maxExpected?: number): Promise<SearchPage> {
+    const { signal } = options;
     const cursor = decodeCursor(cursorValue);
     if (cursor.offset >= SEARCH_WINDOW) throw new SearchLimitError();
     const remainingWindow = SEARCH_WINDOW - cursor.offset;
@@ -630,7 +644,7 @@ export class PubMedClient {
     );
     // Emit per caller, outside the coalesced decoder; expose only numeric metadata.
     if (diagnostic !== undefined) safeEvent(this.#onEvent, { type: "search-total-drift", ...diagnostic });
-    const batch = await this.getMany(state.ids, { includeLinkOuts, ...(signal === undefined ? {} : { signal }) });
+    const batch = await this.getMany(state.ids, options);
     const offset = cursor.offset + state.ids.length;
     return {
       batch: {

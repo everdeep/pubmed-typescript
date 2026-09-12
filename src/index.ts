@@ -21,7 +21,7 @@ export {
 } from "./errors.js";
 export type { PubMedErrorCode } from "./errors.js";
 export type { MemoryCacheOptions } from "./cache.js";
-export type { ParsedPubMedXml } from "./parser.js";
+export type { ParsedPubMedXml, ParsePubMedXmlOptions } from "./parser.js";
 export type {
   AbstractSection,
   Affiliation,

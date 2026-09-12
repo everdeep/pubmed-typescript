@@ -124,7 +124,8 @@ export interface PubMedWarning {
 export interface BasePubMedRecord {
   readonly kind: "article" | "book" | "unknown";
   readonly recordType: string;
-  readonly rawXml: string;
+  /** Exact source fragment, present only when includeRawXml is enabled. */
+  readonly rawXml?: string;
   readonly source: JsonObject;
   readonly identifiers: readonly PubMedIdentifier[];
   readonly links: readonly PubMedLink[];
@@ -276,6 +277,8 @@ export interface SearchBatch extends BatchResult {
 }
 
 export interface RequestOptions {
+  /** Override the client's raw XML inclusion default for this request. */
+  readonly includeRawXml?: boolean;
   readonly includeLinkOuts?: boolean;
   readonly signal?: AbortSignal;
 }
@@ -339,6 +342,8 @@ export type PubMedEvent =
   | Readonly<{ type: "parse-warning"; code: PubMedWarning["code"]; recordType?: string }>;
 
 export interface PubMedClientOptions {
+  /** Include exact source XML fragments in full records. Default false. */
+  readonly includeRawXml?: boolean;
   readonly email: string;
   readonly tool: string;
   readonly apiKey?: string;

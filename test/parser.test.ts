@@ -1,13 +1,13 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
-import { ParseError, parsePubMedXml } from "../src/index.js";
+import { ParseError, ValidationError, parsePubMedXml } from "../src/index.js";
 
 const fixtureUrl = new URL("./fixtures/pubmed.xml", import.meta.url);
 
 describe("parsePubMedXml", () => {
   it("parses article, book, and unknown direct records without losing their XML", async () => {
     const xml = await readFile(fixtureUrl, "utf8");
-    const parsed = parsePubMedXml(xml);
+    const parsed = parsePubMedXml(xml, { includeRawXml: true });
     expect(parsed.records).toHaveLength(4);
 
     const article = parsed.records[0];
@@ -39,6 +39,7 @@ describe("parsePubMedXml", () => {
     const book = parsed.records[1];
     expect(book?.kind).toBe("book");
     if (book?.kind !== "book") throw new Error("expected book");
+    expect(book.rawXml).toBe(xml.slice(xml.indexOf("<PubmedBookArticle>"), xml.indexOf("</PubmedBookArticle>") + "</PubmedBookArticle>".length));
     expect(book.title).toBe("Book chapter");
     expect(book.abstract).toEqual([{ text: "Book summary." }]);
     expect(book.abstractCopyright).toBe("© 2024 Book Publisher");
@@ -53,6 +54,27 @@ describe("parsePubMedXml", () => {
       { code: "UNKNOWN_RECORD", message: "Unknown PubMed record type: FuturePubmedRecord", recordType: "FuturePubmedRecord" },
       { code: "UNKNOWN_RECORD", message: "Unknown PubMed record type: AnotherFuture", recordType: "AnotherFuture" },
     ]);
+  });
+
+  it.each([undefined, false])("omits rawXml from every record kind when includeRawXml is %s", async (includeRawXml) => {
+    const xml = await readFile(fixtureUrl, "utf8");
+    const parsed = includeRawXml === undefined ? parsePubMedXml(xml) : parsePubMedXml(xml, { includeRawXml });
+    const included = parsePubMedXml(xml, { includeRawXml: true });
+    expect(parsed.records).toHaveLength(4);
+    expect(parsed.warnings).toEqual(included.warnings);
+    for (const [index, record] of parsed.records.entries()) {
+      expect(record).not.toHaveProperty("rawXml");
+      const withXml = included.records[index];
+      if (withXml === undefined) throw new Error("expected matching record");
+      const { rawXml, ...metadata } = withXml;
+      expect(rawXml).toBeTypeOf("string");
+      expect(record).toEqual(metadata);
+    }
+  });
+
+  it.each([null, "true", 1, {}, []].map((includeRawXml) => ({ includeRawXml })))("rejects nonboolean includeRawXml: $includeRawXml", ({ includeRawXml }) => {
+    expect(() => Reflect.apply(parsePubMedXml, undefined, ["<PubmedArticleSet />", { includeRawXml }]))
+      .toThrow(ValidationError);
   });
 
   it("decodes valid character references once and preserves CDATA literals", () => {

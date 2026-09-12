@@ -132,7 +132,17 @@ if (record?.kind === "article") {
 }
 ```
 
-Every record includes `rawXml`, which is the exact direct-child XML fragment received from PubMed, without serialization or normalization. `source` retains parsed source data for fields not represented in the normalized surface.
+`rawXml` is omitted by default, including on unknown records. Enable it for a client or individual full-record request to retain the exact direct-child XML fragment received from PubMed, without serialization or normalization:
+
+```ts
+const client = new PubMedClient({ email, tool, includeRawXml: true });
+const record = await client.get("123"); // includes rawXml
+const compact = await client.get("123", { includeRawXml: false }); // omits rawXml
+```
+
+The per-request option also applies to `getMany`, `search` (including cursor requests), and every page of `searchAll`. Each cursor request uses its own option or the client's default, not the previous page's option. The standalone parser similarly supports `parsePubMedXml(xml, { includeRawXml: true })` and omits XML by default.
+
+**Compatibility change:** `rawXml` is now optional (`string | undefined`); consumers that previously relied on its presence must explicitly opt in. This controls returned fields only: XML is still fetched and parsed, and any configured response cache still stores XML bodies. `source` continues to retain parsed source data for fields not represented in the normalized surface. Summary methods are unchanged and do not support this option.
 
 ## Citation export
 
