@@ -75,6 +75,27 @@ if (first.nextCursor) {
 
 Cursors are versioned, base64url-encoded, unsigned, implementation-specific continuation state backed by NCBI search history. Treat them as untrusted values: they are validated when consumed but are not encrypted or authenticated, and their decoded shape is not a public API. They contain no client credentials. Cursors are temporary and can produce `CursorExpiredError`; malformed values produce `CursorInvalidError`.
 
+### Count changes during pagination
+
+NCBI can return HTTP 200 with valid IDs but a different total on a later page. By default, the client stops with `PaginationConsistencyError` (`code: "PAGINATION_INCONSISTENT"`, `retryable: false`), not `INVALID_RESPONSE` or `SEARCH_LIMIT`. This is a consistency signal, **not provider unavailability**. Retrying may succeed, but does not establish consistent results; the client does not automatically retry or restart such searches.
+
+If best-effort pagination is acceptable, opt in explicitly at client construction:
+
+```ts
+const client = new PubMedClient({ email, tool, totalDriftPolicy: "warn" });
+const first = await client.search({ query: "cancer", pageSize: 2 });
+if (first.nextCursor) {
+  const second = await client.search({ cursor: first.nextCursor });
+  console.log(second.diagnostics); // safe count-drift metadata, when present
+}
+```
+
+In both modes, `SearchBatch.total` and the pagination bound remain the **initial** total. Growth never extends the original target; shrinkage never silently shortens it. Continuations retain the original history reference and cursor expiry. Short, empty, oversized, duplicate-ID, or count-contradictory pages still fail before record retrieval, even in `"warn"` mode. The 10,000-ID retrieval window and `searchAll.maxResults` remain enforced.
+
+Warn mode returns a `diagnostics` entry on each drifted page and emits a `search-total-drift` event. A consistency error exposes the same metadata through `.diagnostic` and `toJSON()`: `reason`, `originalTotal`, `observedTotal`, `offset`, `requestedIds`, and `returnedIds`. No queries, PMIDs, cursors, or history tokens are included. Record parse `warnings` remain separate.
+
+Neither mode guarantees snapshot enumeration: equal counts do not prove stable membership or ordering, and page-local uniqueness does not detect cross-page duplicates or omissions. Warn mode explicitly accepts that risk; it does not silently deduplicate or claim complete results. Consumers requiring exact enumeration should not opt in.
+
 For progressive consumption, use `searchAll()`. `maxResults` is required so a caller must make the retrieval bound explicit:
 
 ```ts
@@ -173,9 +194,9 @@ A process-shared FIFO limiter stays below NCBI ceilings: approximately 2.8 reque
 
 The client retries network failures, timeouts, HTTP 408, 429, and 5xx responses with exponential full jitter. Other 4xx responses and XML/JSON parse failures are not retried. Every request uses an `application/x-www-form-urlencoded` POST to a fixed NCBI endpoint; parameters and credentials are never placed in the URL. Response bodies are capped while streaming.
 
-There is no default logging. An optional `onEvent` callback receives sanitized events for correlation IDs, cache hits/misses, in-flight coalescing, requests, response byte counts, retries, queue delays, cooldowns, parse warnings, and terminal failures. Each logical transport request gets a generated opaque correlation ID. A `request-coalesced` event links a joining request's ID to the shared operation's ID; IDs are not derived from request content. Request and retry events also carry correlation IDs when they belong to an HTTP operation. Terminal failures expose only a stable error code, not an error message.
+There is no default logging. An optional `onEvent` callback receives sanitized events for correlation IDs, cache hits/misses, in-flight coalescing, requests, response byte counts, retries, queue delays, cooldowns, parse warnings, tolerated search-total drift, and terminal failures. Each logical transport request gets a generated opaque correlation ID. A `request-coalesced` event links a joining request's ID to the shared operation's ID; IDs are not derived from request content. Request and retry events also carry correlation IDs when they belong to an HTTP operation. Terminal failures expose only a stable error code, not an error message.
 
-Callback exceptions are ignored. Events and typed errors never include API keys, email addresses, queries, request bodies, raw responses, or internal cache keys. Event payloads contain only bounded operational metadata such as endpoint, status, attempt, timing, byte count, error code, and opaque correlation IDs.
+Callback exceptions are ignored. Events and typed errors never include API keys, email addresses, queries, request bodies, raw responses, or internal cache keys. Event payloads contain only bounded operational metadata such as endpoint, status, attempt, timing, byte count, error code, search totals/page counts/offsets, and opaque correlation IDs.
 
 ## Errors
 
@@ -186,6 +207,7 @@ All library failures extend `PubMedError` and have stable `code` and `retryable`
 - `TimeoutError` and `NetworkError`
 - `ResponseTooLargeError` and `QueueFullError`
 - `ParseError` and `InvalidResponseError`
+- `PaginationConsistencyError` (count drift; includes safe `.diagnostic` metadata)
 - `CursorExpiredError` and `CursorInvalidError`
 - `AbortedError`
 - `SearchLimitError`

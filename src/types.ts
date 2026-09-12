@@ -257,9 +257,22 @@ export interface BatchResult {
   readonly warnings: readonly PubMedWarning[];
 }
 
+/** Safe metadata only; never includes queries, PMIDs, cursors, or history tokens. */
+export interface SearchTotalDriftDiagnostic {
+  readonly reason: "total-changed";
+  readonly originalTotal: number;
+  readonly observedTotal: number;
+  readonly offset: number;
+  readonly requestedIds: number;
+  readonly returnedIds: number;
+}
+
 export interface SearchBatch extends BatchResult {
+  /** Initial search total and fixed pagination bound, not a refreshed count. */
   readonly total: number;
   readonly nextCursor: string | null;
+  /** Present when this page tolerated count drift under totalDriftPolicy: "warn". */
+  readonly diagnostics?: readonly SearchTotalDriftDiagnostic[];
 }
 
 export interface RequestOptions {
@@ -313,6 +326,7 @@ export interface RateLimitCoordinator {
 export type PubMedEndpoint = "esearch" | "esummary" | "efetch" | "elink";
 
 export type PubMedEvent =
+  | Readonly<{ type: "search-total-drift" } & SearchTotalDriftDiagnostic>
   | Readonly<{ type: "correlation-id"; endpoint: PubMedEndpoint; correlationId: string }>
   | Readonly<{ type: "cache-hit" | "cache-miss"; endpoint: PubMedEndpoint; correlationId: string }>
   | Readonly<{ type: "request-coalesced"; endpoint: PubMedEndpoint; correlationId: string; sharedCorrelationId: string }>
@@ -337,4 +351,6 @@ export interface PubMedClientOptions {
   readonly maxResponseBytes?: number;
   readonly maxQueuedRequests?: number;
   readonly maxBatchSize?: number;
+  /** Default "error". "warn" explicitly permits best-effort, non-snapshot pagination. */
+  readonly totalDriftPolicy?: "error" | "warn";
 }

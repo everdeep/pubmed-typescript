@@ -4,6 +4,7 @@ import {
   CursorExpiredError,
   CursorInvalidError,
   InvalidResponseError,
+  PaginationConsistencyError,
   SearchLimitError,
   ValidationError,
 } from "./errors.js";
@@ -23,6 +24,7 @@ import type {
   SearchBatch,
   SearchOptions,
   SearchQueryOptions,
+  SearchTotalDriftDiagnostic,
   SummaryBatchResult,
   SummaryRequestOptions,
 } from "./types.js";
@@ -271,10 +273,9 @@ function parseSearchResponse(body: string, cursorContext = false): SearchState {
   return { total: count, webEnv, queryKey, ids };
 }
 
-function validateSearchState(state: SearchState, requestedIds: number, expectedTotal?: number): void {
-  const expectedIds = Math.min(requestedIds, state.total);
+function validateSearchState(state: SearchState, expectedIds: number, offset = 0): void {
   if (
-    (expectedTotal !== undefined && state.total !== expectedTotal) ||
+    state.total < offset + state.ids.length ||
     state.ids.length !== expectedIds ||
     new Set(state.ids).size !== state.ids.length
   ) {
@@ -368,11 +369,16 @@ function withLinks(record: PubMedRecord, extra: readonly PubMedLink[]): PubMedRe
 export class PubMedClient {
   readonly #transport: Transport;
   readonly #maxBatchSize: number;
+  readonly #totalDriftPolicy: "error" | "warn";
   readonly #onEvent: PubMedClientOptions["onEvent"];
 
   public constructor(options: PubMedClientOptions) {
     if (typeof options !== "object" || options === null) throw new ValidationError("PubMedClient options are required");
     validateAdapterShapes(options);
+    if (options.totalDriftPolicy !== undefined && options.totalDriftPolicy !== "error" && options.totalDriftPolicy !== "warn") {
+      throw new ValidationError('totalDriftPolicy must be "error" or "warn"');
+    }
+    this.#totalDriftPolicy = options.totalDriftPolicy ?? "error";
     if (typeof options.email !== "string" || options.email.trim() === "") throw new ValidationError("email is required");
     if (typeof options.tool !== "string" || options.tool.trim() === "") throw new ValidationError("tool is required");
     if (options.apiKey !== undefined && (typeof options.apiKey !== "string" || options.apiKey.trim() === "")) {
@@ -545,7 +551,7 @@ export class PubMedClient {
         key: "esearch-initial-v1",
         decode: (body) => {
           const parsed = parseSearchResponse(body);
-          validateSearchState(parsed, pageSize);
+          validateSearchState(parsed, Math.min(pageSize, parsed.total));
           return parsed;
         },
       },
@@ -587,7 +593,7 @@ export class PubMedClient {
     const remainingWindow = SEARCH_WINDOW - cursor.offset;
     const requested = maxExpected === undefined ? cursor.pageSize : Math.min(cursor.pageSize, positiveInteger(maxExpected, "maxResults"));
     const retmax = Math.min(requested, cursor.total - cursor.offset, remainingWindow);
-    const state = await this.#transport.request(
+    const { state, diagnostic } = await this.#transport.request(
       "esearch",
       {
         term: `#${cursor.queryKey}`,
@@ -599,15 +605,29 @@ export class PubMedClient {
         usehistory: "y",
       },
       {
-        key: `esearch-cursor-v1:${cursor.total}`,
+        key: `esearch-cursor-v2:${cursor.total}:${this.#totalDriftPolicy}`,
         decode: (body) => {
           const parsed = parseSearchResponse(body, true);
-          validateSearchState(parsed, retmax, cursor.total);
-          return parsed;
+          // Never shrink the expected page length to fit a newly reported count.
+          validateSearchState(parsed, retmax, cursor.offset);
+          const diagnostic: SearchTotalDriftDiagnostic | undefined = parsed.total === cursor.total ? undefined : {
+            reason: "total-changed",
+            originalTotal: cursor.total,
+            observedTotal: parsed.total,
+            offset: cursor.offset,
+            requestedIds: retmax,
+            returnedIds: parsed.ids.length,
+          };
+          if (diagnostic !== undefined && this.#totalDriftPolicy === "error") {
+            throw new PaginationConsistencyError(diagnostic);
+          }
+          return { state: parsed, diagnostic };
         },
       },
       { cache: false, ...(signal === undefined ? {} : { signal }) },
     );
+    // Emit per caller, outside the coalesced decoder; expose only numeric metadata.
+    if (diagnostic !== undefined) safeEvent(this.#onEvent, { type: "search-total-drift", ...diagnostic });
     const batch = await this.getMany(state.ids, { includeLinkOuts, ...(signal === undefined ? {} : { signal }) });
     const offset = cursor.offset + state.ids.length;
     return {
@@ -615,6 +635,7 @@ export class PubMedClient {
         ...batch,
         total: cursor.total,
         nextCursor: offset < cursor.total ? encodeCursor({ ...cursor, offset }) : null,
+        ...(diagnostic === undefined ? {} : { diagnostics: [{ ...diagnostic }] }),
       },
       expectedPmids: state.ids,
     };

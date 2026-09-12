@@ -1,3 +1,5 @@
+import type { SearchTotalDriftDiagnostic } from "./types.js";
+
 export type PubMedErrorCode =
   | "VALIDATION_ERROR"
   | "HTTP_ERROR"
@@ -8,6 +10,7 @@ export type PubMedErrorCode =
   | "QUEUE_FULL"
   | "PARSE_ERROR"
   | "INVALID_RESPONSE"
+  | "PAGINATION_INCONSISTENT"
   | "CURSOR_EXPIRED"
   | "CURSOR_INVALID"
   | "ABORTED"
@@ -97,6 +100,27 @@ export class InvalidResponseError extends PubMedError {
   public constructor(message = "PubMed returned an invalid response", options?: ErrorOptions) {
     super(message, "INVALID_RESPONSE", false, options);
     this.name = "InvalidResponseError";
+  }
+}
+
+export class PaginationConsistencyError extends PubMedError {
+  public readonly diagnostic: SearchTotalDriftDiagnostic;
+
+  public constructor(diagnostic: SearchTotalDriftDiagnostic) {
+    super("PubMed search total changed during pagination", "PAGINATION_INCONSISTENT");
+    this.name = "PaginationConsistencyError";
+    this.diagnostic = Object.freeze({
+      reason: "total-changed",
+      originalTotal: diagnostic.originalTotal,
+      observedTotal: diagnostic.observedTotal,
+      offset: diagnostic.offset,
+      requestedIds: diagnostic.requestedIds,
+      returnedIds: diagnostic.returnedIds,
+    });
+  }
+
+  public override toJSON(): ReturnType<PubMedError["toJSON"]> & Readonly<{ diagnostic: SearchTotalDriftDiagnostic }> {
+    return { ...super.toJSON(), diagnostic: this.diagnostic };
   }
 }
 
