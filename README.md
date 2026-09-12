@@ -77,12 +77,14 @@ Cursors are versioned, base64url-encoded, unsigned, implementation-specific cont
 
 ### Count changes during pagination
 
-NCBI can return HTTP 200 with valid IDs but a different total on a later page. By default, the client stops with `PaginationConsistencyError` (`code: "PAGINATION_INCONSISTENT"`, `retryable: false`), not `INVALID_RESPONSE` or `SEARCH_LIMIT`. This is a consistency signal, **not provider unavailability**. Retrying may succeed, but does not establish consistent results; the client does not automatically retry or restart such searches.
+NCBI can return HTTP 200 with valid IDs but a different total on a later page. By default, `search()` and `searchAll()` **continue retrieving valid pages**, returning count-drift diagnostics and emitting a `search-total-drift` event. The default `totalDriftPolicy` is `"warn"` (version 0.1.1 defaulted to `"error"`); no explicit opt-in or event handler is required. This is best-effort pagination, not a snapshot guarantee.
 
-If best-effort pagination is acceptable, opt in explicitly at client construction:
+To stop on count changes, explicitly configure `totalDriftPolicy: "error"`. Strict mode throws `PaginationConsistencyError` (`code: "PAGINATION_INCONSISTENT"`, `retryable: false`) before fetching the changed page's records. This is a consistency signal, **not provider unavailability**. The client does not automatically retry or restart such searches.
+
+With the default policy:
 
 ```ts
-const client = new PubMedClient({ email, tool, totalDriftPolicy: "warn" });
+const client = new PubMedClient({ email, tool }); // totalDriftPolicy: "warn" by default
 const first = await client.search({ query: "cancer", pageSize: 2 });
 if (first.nextCursor) {
   const second = await client.search({ cursor: first.nextCursor });
@@ -94,7 +96,7 @@ In both modes, `SearchBatch.total` and the pagination bound remain the **initial
 
 Warn mode returns a `diagnostics` entry on each drifted page and emits a `search-total-drift` event. A consistency error exposes the same metadata through `.diagnostic` and `toJSON()`: `reason`, `originalTotal`, `observedTotal`, `offset`, `requestedIds`, and `returnedIds`. No queries, PMIDs, cursors, or history tokens are included. Record parse `warnings` remain separate.
 
-Neither mode guarantees snapshot enumeration: equal counts do not prove stable membership or ordering, and page-local uniqueness does not detect cross-page duplicates or omissions. Warn mode explicitly accepts that risk; it does not silently deduplicate or claim complete results. Consumers requiring exact enumeration should not opt in.
+Neither mode guarantees snapshot enumeration: equal counts do not prove stable membership or ordering, and page-local uniqueness does not detect cross-page duplicates or omissions. Warn mode accepts that risk; it does not silently deduplicate or claim complete results. Consumers should persist by PMID idempotently and inspect `missingPmids` and `diagnostics`. Consumers requiring a stop on count drift should select `"error"`, but that alone does not establish exact enumeration.
 
 For progressive consumption, use `searchAll()`. `maxResults` is required so a caller must make the retrieval bound explicit:
 

@@ -61,7 +61,9 @@ export class Transport {
     const correlationId = randomUUID();
     safeEvent(this.#onEvent, { type: "correlation-id", endpoint, correlationId });
     try {
-      return await this.#coordinate(endpoint, parameters, decode, options, correlationId);
+      const value = await this.#coordinate(endpoint, parameters, decode, options, correlationId);
+      if (options.signal?.aborted) throw new AbortedError();
+      return value;
     } catch (error) {
       safeEvent(this.#onEvent, {
         type: "terminal-failure",
@@ -93,6 +95,7 @@ export class Transport {
       const cached = await this.#cache.read(key, signal);
       if (cached.status === "hit") {
         safeEvent(this.#onEvent, { type: "cache-hit", endpoint, correlationId });
+        if (signal?.aborted) throw new AbortedError();
         if (encoder.encode(cached.value).byteLength > this.#maxResponseBytes) {
           await this.#cache.invalidate(key);
         } else {

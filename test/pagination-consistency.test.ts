@@ -52,8 +52,8 @@ function decode(cursor: string) {
 }
 
 describe("pagination consistency", () => {
-  it.each([5_699_835, 5_699_700])("classifies count drift to %s separately from provider or malformed-response failures by default", async (total) => {
-    const { client, fetchMock, events } = setup([reportedPages[0]!, { total, ids: ["7", "6"] }]);
+  it.each([5_699_835, 5_699_700])("classifies count drift to %s separately in explicit strict mode", async (total) => {
+    const { client, fetchMock, events } = setup([reportedPages[0]!, { total, ids: ["7", "6"] }], { totalDriftPolicy: "error" });
     const expectedDiagnostic = { ...diagnostic, observedTotal: total };
     const first = await client.search({ query: "private query", pageSize: 2 });
     const error: unknown = await client.search({ cursor: first.nextCursor! }).catch((caught: unknown) => caught);
@@ -71,6 +71,41 @@ describe("pagination consistency", () => {
     for (const secret of ["private query", "private@example.test", "private-key", "private-history-token", "replacement-history-token", first.nextCursor!]) {
       expect(serialized).not.toContain(secret);
     }
+  });
+
+  it.each([5_699_835, 5_699_700])("continues retrieving records by default when the count changes to %s", async (total) => {
+    const { client, events, fetchMock } = setup([reportedPages[0]!, { total, ids: ["7", "6"] }]);
+    const first = await client.search({ query: "ingestion", pageSize: 2 });
+    const second = await client.search({ cursor: first.nextCursor! });
+    expect(second.records.map((record) => record.pmid)).toEqual(["7", "6"]);
+    expect(second.total).toBe(reportedPages[0]!.total);
+    expect(second.diagnostics).toEqual([{ ...diagnostic, observedTotal: total }]);
+    expect(events).toContainEqual({ type: "search-total-drift", ...diagnostic, observedTotal: total });
+    expect(events.some((event) => event.type === "terminal-failure" || event.type === "retry")).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it.each([6, 30])("streams to maxResults by default despite drift to %s", async (total) => {
+    const { client, searches } = setup([
+      { total: 8, ids: ["8", "7"] }, { total, ids: ["6", "5"] }, { total, ids: ["4"] },
+    ], {}, ["5"]);
+    const batches = [];
+    for await (const batch of client.searchAll({ query: "ingestion", pageSize: 2, maxResults: 5 })) batches.push(batch);
+    expect(batches.flatMap((batch) => batch.records.map((record) => record.pmid))).toEqual(["8", "7", "6", "4"]);
+    expect(batches.flatMap((batch) => batch.missingPmids)).toEqual(["5"]);
+    expect(batches.map((batch) => batch.total)).toEqual([8, 8, 8]);
+    expect(searches.map((parameters) => parameters.get("retmax"))).toEqual(["2", "2", "1"]);
+    expect(decode(batches.at(-1)!.nextCursor!).offset).toBe(5);
+  });
+
+  it("stops searchAll before retrieving the changed page in explicit strict mode", async () => {
+    const { client, fetchMock } = setup(reportedPages, { totalDriftPolicy: "error" });
+    const iterator = client.searchAll({ query: "strict ingestion", pageSize: 2, maxResults: 4 })[Symbol.asyncIterator]();
+    const first = await iterator.next();
+    if (first.done) throw new Error("expected an initial search batch");
+    expect(first.value.records.map((record) => record.pmid)).toEqual(["9", "8"]);
+    await expect(iterator.next()).rejects.toBeInstanceOf(PaginationConsistencyError);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it.each([5_699_835, 5_699_700])("allows explicit best-effort continuation for changed total %s", async (total) => {
@@ -107,7 +142,7 @@ describe("pagination consistency", () => {
     ["zero", 0, []],
     ["contradictory count", 3, ["7", "6"]],
   ] as const)("still rejects %s continuation pages before fetching records", async (_name, total, ids) => {
-    const { client, fetchMock } = setup([{ total: 8, ids: ["9", "8"] }, { total, ids: [...ids] }], { totalDriftPolicy: "warn" });
+    const { client, fetchMock } = setup([{ total: 8, ids: ["9", "8"] }, { total, ids: [...ids] }]);
     const first = await client.search({ query: "invalid", pageSize: 2 });
     await expect(client.search({ cursor: first.nextCursor! })).rejects.toBeInstanceOf(InvalidResponseError);
     expect(fetchMock).toHaveBeenCalledTimes(3);
@@ -116,7 +151,7 @@ describe("pagination consistency", () => {
   it.each([3, 5])("keeps searchAll bounded to original target despite growth (maxResults=%s)", async (maxResults) => {
     const { client, searches } = setup([
       { total: 3, ids: ["3", "2"] }, { total: 30, ids: ["1"] },
-    ], { totalDriftPolicy: "warn" }, ["2", "1"]);
+    ], {}, ["2", "1"]);
     const batches = [];
     for await (const batch of client.searchAll({ query: "bounded", pageSize: 2, maxResults })) batches.push(batch);
     expect(searches.map((parameters) => parameters.get("retmax"))).toEqual(["2", "1"]);

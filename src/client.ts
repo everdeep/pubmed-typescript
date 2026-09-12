@@ -378,7 +378,7 @@ export class PubMedClient {
     if (options.totalDriftPolicy !== undefined && options.totalDriftPolicy !== "error" && options.totalDriftPolicy !== "warn") {
       throw new ValidationError('totalDriftPolicy must be "error" or "warn"');
     }
-    this.#totalDriftPolicy = options.totalDriftPolicy ?? "error";
+    this.#totalDriftPolicy = options.totalDriftPolicy ?? "warn";
     if (typeof options.email !== "string" || options.email.trim() === "") throw new ValidationError("email is required");
     if (typeof options.tool !== "string" || options.tool.trim() === "") throw new ValidationError("tool is required");
     if (options.apiKey !== undefined && (typeof options.apiKey !== "string" || options.apiKey.trim() === "")) {
@@ -446,6 +446,7 @@ export class PubMedClient {
     let ordered: readonly PubMedRecord[] = input.flatMap((pmid) => byPmid.get(pmid) ?? []);
     if (unknown.length > 0) ordered = [...ordered, ...unknown];
     if (options.includeLinkOuts === true && ordered.length > 0) ordered = await this.#enrich(ordered, options.signal);
+    if (options.signal?.aborted) throw new AbortedError();
     return {
       records: ordered,
       missingPmids: input.filter((pmid) => !byPmid.has(pmid)),
@@ -478,6 +479,7 @@ export class PubMedClient {
       received.push(...summaries);
     }
 
+    if (options.signal?.aborted) throw new AbortedError();
     const byPmid = new Map(received.map((summary) => [summary.pmid, summary]));
     return {
       summaries: input.flatMap((pmid) => byPmid.get(pmid) ?? []),

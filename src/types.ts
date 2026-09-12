@@ -351,6 +351,6 @@ export interface PubMedClientOptions {
   readonly maxResponseBytes?: number;
   readonly maxQueuedRequests?: number;
   readonly maxBatchSize?: number;
-  /** Default "error". "warn" explicitly permits best-effort, non-snapshot pagination. */
+  /** Default "warn": continue valid pages with drift diagnostics. "error" opts into stopping on count changes. Neither guarantees a snapshot. */
   readonly totalDriftPolicy?: "error" | "warn";
 }

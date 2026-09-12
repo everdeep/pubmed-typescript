@@ -1,6 +1,6 @@
 {
   "name": "@everdeep/pubmed",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Safe, typed TypeScript client for the NCBI PubMed E-utilities API",
   "type": "module",
   "main": "./dist/index.cjs",

@@ -158,6 +158,36 @@ describe("cache, coordination, and coalescing", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it.each(["records", "summaries"] as const)("honors cancellation from cache-hit callbacks for %s", async (kind) => {
+    const controller = new AbortController();
+    const fetchMock = vi.fn<typeof fetch>();
+    const cache: CacheAdapter = {
+      async get() {
+        return kind === "records" ? xml : JSON.stringify({ result: { uids: ["1"], "1": { uid: "1", title: "One" } } });
+      },
+      async set() {},
+    };
+    const client = new PubMedClient({
+      email: "a@example.test", tool: "tests", cache, fetch: fetchMock,
+      onEvent: (event) => { if (event.type === "cache-hit") controller.abort(); },
+    });
+    const request = kind === "records"
+      ? client.getMany(["1"], { signal: controller.signal })
+      : client.getManySummaries(["1"], { signal: controller.signal });
+    await expect(request).rejects.toBeInstanceOf(AbortedError);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("honors cancellation from parse-warning callbacks instead of returning partial success", async () => {
+    const controller = new AbortController();
+    const client = new PubMedClient({
+      email: "a@example.test", tool: "tests", apiKey: "parse-warning-abort",
+      fetch: vi.fn<typeof fetch>(async () => new Response("<PubmedArticleSet><FutureRecord/></PubmedArticleSet>")),
+      onEvent: (event) => { if (event.type === "parse-warning") controller.abort(); },
+    });
+    await expect(client.getMany(["1"], { signal: controller.signal })).rejects.toBeInstanceOf(AbortedError);
+  });
+
   it("uses credential fingerprints—not raw API keys—with distributed coordination", async () => {
     const buckets: RateLimitBucket[] = [];
     const coordinator: RateLimitCoordinator = {
